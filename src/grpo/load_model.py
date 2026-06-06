@@ -99,13 +99,27 @@ if __name__ == "__main__":
         temperature=1.2
     )
     
-    # 結果の表示
-    print("-" * 50)
+    # 5. 【新規追加】サンプリングされた 8 個の手から、それぞれ対局を最後まで走らせる
+    print("\nRunning self-play rollouts for the 8 actions...")
+    rewards = []
+    
     for i in range(8):
         action_idx = actions[i].item()
         move_id = tokenizer.index_to_move_id(action_idx)
-        print(f"Sample {i+1}:")
-        print(f"  - Action Index: {action_idx} (move_id: {move_id})")
-        print(f"  - Policy Log Prob: {log_pi[i].item():.4f}")
-        print(f"  - Ref Log Prob   : {log_ref[i].item():.4f}")
+        
+        # 進行状況がわかるように print しながら実行します
+        print(f"  - Playing Game {i+1}/8 (First Move ID: {move_id})... ", end="", flush=True)
+        
+        # ロールアウトメソッドの実行
+        reward = agent.rollout_single_game(
+            initial_board_state=board,
+            first_move_idx=action_idx,
+            temperature=1.0  # 対局中の行動の多様性 (1.0 が標準です)
+        )
+        
+        rewards.append(reward)
+        print(f"Finished. Reward: {reward}")
+        
     print("-" * 50)
+    print(f"All Rollouts Completed! Rewards: {rewards}")
+    print("-" * 50) 

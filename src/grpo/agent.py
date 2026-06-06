@@ -1,6 +1,8 @@
 import torch
 from torch.distributions import Categorical
 
+from renju_transformer.rules import infer_player, winner_after_move
+
 class GRPOAgent:
     def __init__(self, policy_model, ref_model, tokenizer, device):
         self.policy = policy_model
@@ -41,7 +43,38 @@ class GRPOAgent:
             log_probs_ref = ref_dist.log_prob(sample_actions)
 
         return sample_actions, log_probs_policy, log_probs_ref
+    
+    def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0) -> float:
+        board = initial_board_state.copy()
+        board[first_move_idx] = 1 # プレイヤー1が石を置く
+        
+        winner = winner_after_move(board, first_move_idx, 1) # 終了判定
+        if winner is not None:
+            return 1.0 if winner == 1 else -1.0 # 勝ちなら1、負けなら-1
+        
+        for ply in range(2, max_plies + 1):
+            current_player = infer_player(board)
 
+            legal_mask = self.tokenizer.legal_move_mask(board).to(self.device)
+            if not legal_mask.any():
+                return 0.0 # 打てる場所がない
+            
+            input_ids = self.tokenizer.encode_input(board).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                logits = self.policy(input_ids).squeeze(0)
+                masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
+                probs = torch.softmax(masked_logits / temperature, dim = -1)
+                dist = Categorical(probs = probs)
+                move_idx = dist.sample().item()
+
+            board[move_idx] = current_player
+
+            winner = winner_after_move(board, move_idx, current_player)
+            if winner is not None:
+                return 1.0 if winner == 1 else -1.0
+            
+        return 0.0
 
 
     def update_policy(self, loss):
