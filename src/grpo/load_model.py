@@ -1,10 +1,13 @@
 import copy
 from pathlib import Path
 import torch
+from torch.distributions import Categorical  # 追加
 from omegaconf import DictConfig
 
 # 既存のモデルクラスとデバイス選択ヘルパーをインポート
 from renju_transformer.model import RenjuTransformerModel
+from renju_transformer.tokenizer import RenjuTokenizer  # 追加
+from grpo.agent import GRPOAgent
 from renju_transformer.utils import select_device
 
 def load_policy_and_reference(checkpoint_path: str | Path, device: torch.device):
@@ -77,3 +80,32 @@ if __name__ == "__main__":
     print("Reference Model parameters requiring grad:")
     # Referenceはパラメータ固定なので False
     print(any(p.requires_grad for p in ref.parameters()))    # -> False になるべき
+
+    # トークナイザの準備
+    # デフォルトの引数値 (sep_token_id=228, move_id_offset=3) を指定
+    tokenizer = RenjuTokenizer(sep_token_id=228, move_id_offset=3)
+    
+    # テスト用の空盤面 (225個の0) を用意
+    board = [0] * 225
+    
+    # 8個の手をサンプリング (動作テストのため温度を少し高めの 1.2 にして手をばらけさせます)
+    print("\nSampling 8 actions from the empty board...")
+
+    agent = GRPOAgent(policy_model=policy, ref_model=ref, tokenizer=tokenizer, device=device)
+
+    actions, log_pi, log_ref = agent.get_group_actions(
+        board_state=board,
+        group_size=8,
+        temperature=1.2
+    )
+    
+    # 結果の表示
+    print("-" * 50)
+    for i in range(8):
+        action_idx = actions[i].item()
+        move_id = tokenizer.index_to_move_id(action_idx)
+        print(f"Sample {i+1}:")
+        print(f"  - Action Index: {action_idx} (move_id: {move_id})")
+        print(f"  - Policy Log Prob: {log_pi[i].item():.4f}")
+        print(f"  - Ref Log Prob   : {log_ref[i].item():.4f}")
+    print("-" * 50)

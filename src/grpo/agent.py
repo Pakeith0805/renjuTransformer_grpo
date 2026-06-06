@@ -1,0 +1,53 @@
+import torch
+from torch.distributions import Categorical
+
+class GRPOAgent:
+    def __init__(self, policy_model, ref_model, tokenizer, device):
+        self.policy = policy_model
+        self.ref = ref_model
+        self.tokenizer = tokenizer
+        self.device = device
+
+    def get_group_actions(self, board_state, group_size=8, temperature=1.0):
+        """盤面から G 個のアクションと、Policy/Ref それぞれの対数確率を計算して返す"""
+        # unsqueezeはバッチサイズを入力するため
+        input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
+
+        # 合法手マスクの取得
+        legal_mask = self.tokenizer.legal_move_mask(board_state).to(self.device)
+
+        # policyモデルによる予測
+        policy_logits = self.policy(input_ids).squeeze(0)
+
+        # 非合法な手のロジットを-無限にして、確率を0にする。ビット反転。なんか変な処理だから直そう
+        masked_policy_logits = policy_logits.masked_fill(~legal_mask, float("-inf"))
+
+        # tempuratureでスケーリングして確率分布を作成
+        policy_probs = torch.softmax(masked_policy_logits / temperature, dim=-1)
+
+        # ガチャを作る
+        policy_dist = Categorical(probs = policy_probs)
+
+        # ガチャを引く
+        sample_actions = policy_dist.sample((group_size, ))
+
+        # klダイバージェンスを計算するために、対数確率を計算
+        log_probs_policy = policy_dist.log_prob(sample_actions)
+        with torch.no_grad():
+            ref_logits = self.ref(input_ids).squeeze(0)
+            masked_ref_logits = ref_logits.masked_fill(~legal_mask, float("-inf"))
+            ref_probs = torch.softmax(masked_ref_logits / temperature, dim=-1)
+            ref_dist = Categorical(probs=ref_probs)
+            log_probs_ref = ref_dist.log_prob(sample_actions)
+
+        return sample_actions, log_probs_policy, log_probs_ref
+
+
+
+    def update_policy(self, loss):
+        """Policyモデルの勾配更新をトリガーする"""
+        # （Trainer から呼ばれて Policy の重みを更新する）
+        pass
+
+
+
