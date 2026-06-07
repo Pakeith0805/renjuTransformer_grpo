@@ -50,14 +50,14 @@ class GRPOAgent:
         
         winner = winner_after_move(board, first_move_idx, 1) # 終了判定
         if winner is not None:
-            return 1.0 if winner == 1 else -1.0 # 勝ちなら1、負けなら-1
+            return (1.0 if winner == 1 else -1.0), board # 勝ちなら1、負けなら-1
         
         for ply in range(2, max_plies + 1):
             current_player = infer_player(board)
 
             legal_mask = self.tokenizer.legal_move_mask(board).to(self.device)
             if not legal_mask.any():
-                return 0.0 # 打てる場所がない
+                return 0.0, board # 打てる場所がない
             
             input_ids = self.tokenizer.encode_input(board).unsqueeze(0).to(self.device)
 
@@ -72,9 +72,9 @@ class GRPOAgent:
 
             winner = winner_after_move(board, move_idx, current_player)
             if winner is not None:
-                return 1.0 if winner == 1 else -1.0
+                return (1.0 if winner == 1 else -1.0), board
             
-        return 0.0
+        return 0.0, board
 
 
     def update_policy(self, loss):
