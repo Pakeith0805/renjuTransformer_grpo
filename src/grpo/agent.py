@@ -76,7 +76,6 @@ class GRPOAgent:
             
         return 0.0, board
 
-
     def update_policy(self, loss):
         """Policyモデルの勾配更新をトリガーする"""
         # （Trainer から呼ばれて Policy の重みを更新する）
