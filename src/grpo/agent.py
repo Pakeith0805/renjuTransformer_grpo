@@ -1,7 +1,7 @@
 import torch
 from torch.distributions import Categorical
 
-from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black
+from renju_transformer.rules import infer_player, winner_after_move
 
 class GRPOAgent:
     def __init__(self, policy_model, ref_model, tokenizer, device):
@@ -15,8 +15,8 @@ class GRPOAgent:
         # unsqueezeはバッチサイズを入力するため
         input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
 
-        # 簡易マスクの取得 (空きマス 0 の箇所のみを True にする)
-        legal_mask = torch.tensor([cell == 0 for cell in board_state], dtype=torch.bool, device=self.device)
+        # 合法手マスクの取得
+        legal_mask = self.tokenizer.legal_move_mask(board_state).to(self.device)
 
         # policyモデルによる予測
         policy_logits = self.policy(input_ids).squeeze(0)
@@ -46,14 +46,6 @@ class GRPOAgent:
     
     def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0) -> float:
         board = initial_board_state.copy()
-        
-        # 初手（黒）が禁じ手（空盤面において天元以外）かどうかチェック
-        # 空盤面を渡す
-        empty_board = [0] * len(board)
-        if is_forbidden_for_black(empty_board, first_move_idx):
-            # 禁じ手を打った場合は、即座に黒の反則負け（ペナルティ報酬 -1.5）
-            return -1.5, board
-
         board[first_move_idx] = 1 # プレイヤー1が石を置く
         
         winner = winner_after_move(board, first_move_idx, 1) # 終了判定
@@ -63,8 +55,7 @@ class GRPOAgent:
         for ply in range(2, max_plies + 1):
             current_player = infer_player(board)
 
-            # 簡易マスク：空きマス(0)の場所のみTrue
-            legal_mask = torch.tensor([cell == 0 for cell in board], dtype=torch.bool, device=self.device)
+            legal_mask = self.tokenizer.legal_move_mask(board).to(self.device)
             if not legal_mask.any():
                 return 0.0, board # 打てる場所がない
             
@@ -76,12 +67,6 @@ class GRPOAgent:
                 probs = torch.softmax(masked_logits / temperature, dim = -1)
                 dist = Categorical(probs = probs)
                 move_idx = dist.sample().item()
-
-            # 黒番（プレイヤー1）が石を置く直前に禁じ手かどうかチェック
-            if current_player == 1:
-                if is_forbidden_for_black(board, move_idx):
-                    # 禁じ手を打った場合は即座に黒の反則負け（ペナルティ報酬 -1.5）
-                    return -1.5, board
 
             board[move_idx] = current_player
 
