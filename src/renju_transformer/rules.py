@@ -10,36 +10,36 @@ WHITE = 2
 DIRECTIONS = ((1, 0), (0, 1), (1, 1), (1, -1))
 CENTER_INDEX = (BOARD_SIZE // 2) * BOARD_SIZE + (BOARD_SIZE // 2)
 
-
+# 0～224を盤面の座標に変換
 def idx_to_rc(index: int) -> tuple[int, int]:
     return divmod(index, BOARD_SIZE)
 
-
+# 逆変換
 def rc_to_idx(row: int, col: int) -> int:
     return row * BOARD_SIZE + col
 
-
+# 入力されたタプルがちゃんと盤面に収まってるか判定
 def inside(row: int, col: int) -> bool:
     return 0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE
 
-
+# 今のボードと、位置と、プレイヤー名から、1手進んだ未来の盤面を返す
 def board_with_move(board: list[int], index: int, player: int) -> list[int]:
     next_board = board.copy()
     next_board[index] = player
     return next_board
 
-
+# 盤面上の白石と黒石の数をそれぞれ数えて返す
 def stone_counts(board: list[int]) -> tuple[int, int]:
     black_count = sum(1 for cell in board if cell == BLACK)
     white_count = sum(1 for cell in board if cell == WHITE)
     return black_count, white_count
 
-
+# 盤上の石の数を返す
 def move_number(board: list[int]) -> int:
     black_count, white_count = stone_counts(board)
     return black_count + white_count
 
-
+# drはrowのdirection、dcはcolumnのdirection。特定の方向に、同じ色の石が何個連続で並んでいるかを返す。
 def contiguous_count(board: list[int], index: int, player: int, dr: int, dc: int) -> int:
     total = 1
     row, col = idx_to_rc(index)
@@ -60,23 +60,23 @@ def contiguous_count(board: list[int], index: int, player: int, dr: int, dc: int
 
     return total
 
-
+# 今持っている石を置いたとき、5個以上石が連続で並ぶかを判定
 def has_five_or_more(board: list[int], index: int, player: int) -> bool:
     return any(contiguous_count(board, index, player, dr, dc) >= 5 for dr, dc in DIRECTIONS)
 
-
+# 今持っている石を置いたとき、6個以上石が連続で並んでいるかを判定
 def is_overline(board: list[int], index: int, player: int) -> bool:
     return any(contiguous_count(board, index, player, dr, dc) >= 6 for dr, dc in DIRECTIONS)
 
-
+# 盤面全体を探索し、五連以上を達成している箇所があるかを判定
 def player_has_five(board: list[int], player: int) -> bool:
     return any(cell == player and has_five_or_more(board, index, player) for index, cell in enumerate(board))
 
-
+# 盤面全体を探索し、六連以上を達成している箇所があるかを判定
 def player_has_overline(board: list[int], player: int) -> bool:
     return any(cell == player and is_overline(board, index, player) for index, cell in enumerate(board))
 
-
+# 指定した位置を通り、特定の方向に延びる直線状のマスを端から端まですべてリストにして取得
 def line_points_through(index: int, dr: int, dc: int) -> list[int]:
     row, col = idx_to_rc(index)
     while inside(row - dr, col - dc):
@@ -90,20 +90,20 @@ def line_points_through(index: int, dr: int, dc: int) -> list[int]:
         col += dc
     return points
 
-
+# 特定の直線状で、あと1手で勝ちになる位置の集合を返す
 def immediate_wins_in_direction(board: list[int], player: int, line_points: list[int]) -> set[int]:
     wins: set[int] = set()
     for candidate in line_points:
         if board[candidate] != EMPTY:
             continue
         next_board = board_with_move(board, candidate, player)
-        if player == BLACK and is_overline(next_board, candidate, BLACK):
+        if player == BLACK and is_overline(next_board, candidate, BLACK): # 黒の6連以上は反則
             continue
         if has_five_or_more(next_board, candidate, player):
             wins.add(candidate)
     return wins
 
-
+# 指定した位置に打ったとき、いくつの方向で4連になるかを数える。
 def count_four_directions(board: list[int], move: int, player: int) -> int:
     count = 0
     for dr, dc in DIRECTIONS:
@@ -112,7 +112,7 @@ def count_four_directions(board: list[int], move: int, player: int) -> int:
             count += 1
     return count
 
-
+# いくつの方向で活三が出来るか判定
 def count_open_three_directions(board: list[int], move: int, player: int) -> int:
     count = 0
     for dr, dc in DIRECTIONS:
@@ -132,7 +132,7 @@ def count_open_three_directions(board: list[int], move: int, player: int) -> int
             count += 1
     return count
 
-
+# 盤面上の黒石と白石の数から、次はどちらの手番かを判定
 def infer_player(board: list[int]) -> int:
     black_count, white_count = stone_counts(board)
     if black_count == white_count:
@@ -144,7 +144,7 @@ def infer_player(board: list[int]) -> int:
         "Expected black == white or black == white + 1."
     )
 
-
+# 黒にとって、そのマスが禁じ手かどうか判定
 def is_forbidden_for_black(board: list[int], index: int) -> bool:
     if board[index] != EMPTY:
         return True
@@ -164,7 +164,7 @@ def is_forbidden_for_black(board: list[int], index: int) -> bool:
         return True
     return False
 
-
+# 盤面全体の合法手のリストを作る
 def legal_move_mask(board: list[int]) -> list[bool]:
     player = infer_player(board)
     mask: list[bool] = []
@@ -178,7 +178,7 @@ def legal_move_mask(board: list[int]) -> list[bool]:
             mask.append(True)
     return mask
 
-
+# 石を置いた直後に勝敗が決まるか判定
 def winner_after_move(board: list[int], index: int, player: int) -> int | None:
     if player == BLACK and is_overline(board, index, BLACK):
         return WHITE
@@ -186,7 +186,7 @@ def winner_after_move(board: list[int], index: int, player: int) -> int | None:
         return player
     return None
 
-
+# 盤面全体をスキャンして、既に勝負がついているかを判定
 def board_winner(board: list[int]) -> int | None:
     if player_has_overline(board, BLACK):
         return WHITE
