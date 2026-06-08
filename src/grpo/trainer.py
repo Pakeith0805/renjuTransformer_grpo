@@ -1,5 +1,6 @@
 import torch
 
+# 報酬を受け取ってアドバンテージを返す関数
 def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     if not isinstance(rewards, torch.Tensor):
         rewards = torch.tensor(rewards, dtype=torch.float32)
@@ -19,6 +20,7 @@ class GRPOTrainer:
         self.optimizer = optimizer
         self.cfg = cfg
 
+    # 
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
         actions, log_probs_policy, log_probs_ref = self.agent.get_group_actions(board_state, group_size=8)
@@ -27,8 +29,8 @@ class GRPOTrainer:
         rewards = []
 
         for i in range(8):
-            rewards, _ = self.agent.rollout_single_game(board_state, actions[i].item())
-            rewards.append(rewards)
+            reward, _ = self.agent.rollout_single_game(board_state, actions[i].item())
+            rewards.append(reward)
 
         advantages = compute_group_advantages(rewards)
 
@@ -47,7 +49,7 @@ class GRPOTrainer:
 
         self.optimizer.zero_grad()
 
-        total_loss.backyard()
+        total_loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.agent.policy.parameters(), max_norm=1.0)
 
@@ -63,6 +65,7 @@ class GRPOTrainer:
             "rewards": rewards  # 個々の勝敗ログ
         }
 
+    # 損失関数を返す関数
     def compute_grpo_loss(
             log_probs_policy: torch.Tensor,
             log_probs_old: torch.Tensor,
