@@ -168,7 +168,7 @@ class GRPOTrainer:
         initial_board = [0] * 225
         trajectory_boards = []
 
-        sample_prob = self.cfg.grpo.get("trajectory_sample_prob, 0.8")
+        sample_prob = self.cfg.grpo.get("trajectory_sample_prob", 0.8)
         
         # MLflow の実験コンテキストを開始
         with mlflow.start_run(run_name=self.cfg.mlflow.run_name_prefix + "-grpo", nested=True):
