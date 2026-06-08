@@ -30,7 +30,11 @@ class GRPOTrainer:
     # 
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
-        actions, log_probs_policy, log_probs_ref = self.agent.get_group_actions(board_state, group_size=8)
+        actions, log_probs_policy, log_probs_ref = self.agent.get_group_actions(
+            board_state, 
+            group_size=8, 
+            temperature=self.cfg.grpo.temperature
+        )
 
         # 報酬を回収
         rewards = []
