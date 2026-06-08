@@ -1,4 +1,11 @@
 import torch
+import random
+from pathlib import Path
+from tqdm import tqdm
+from omegaconf import OmegaConf
+import mlflow
+from renju_transformer.rules import infer_player, winner_after_move
+from torch.distributions import Categorical
 
 # 報酬を受け取ってアドバンテージを返す関数
 def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -67,6 +74,7 @@ class GRPOTrainer:
 
     # 損失関数を返す関数
     def compute_grpo_loss(
+            self,
             log_probs_policy: torch.Tensor,
             log_probs_old: torch.Tensor,
             log_probs_ref: torch.Tensor,
@@ -91,3 +99,50 @@ class GRPOTrainer:
         total_loss = policy_loss + beta * kl_loss
 
         return total_loss, policy_loss, kl_loss
+    
+    # src/grpo/trainer.py 内の GRPOTrainer クラスに追記
+
+    def train(self, num_iterations: int = 1000, save_every: int = 50):
+        """
+        強化学習（GRPO）のメインループを実行します (初期盤面のみのシンプルテスト版)。
+        """
+        print(f"Starting simple GRPO training for {num_iterations} iterations...")
+        
+        # 初期盤面 (225マスの空盤面) を作成
+        initial_board = [0] * 225
+        
+        # MLflow の実験コンテキストを開始
+        with mlflow.start_run(run_name=self.cfg.mlflow.run_name_prefix + "-grpo", nested=True):
+            
+            progress = tqdm(range(1, num_iterations + 1), desc="GRPO Iterations")
+            for iteration in progress:
+                
+                # 初期盤面から 8 通り試して Policy を更新 (1回の学習ステップ)
+                metrics = self.train_step(
+                    initial_board, 
+                    beta=self.cfg.grpo.beta, 
+                    clip_eps=self.cfg.grpo.clip_eps
+                )
+                
+                # メトリクス（Loss、KL、平均報酬）を MLflow に記録
+                mlflow.log_metric("grpo_loss", metrics["loss"], step=iteration)
+                mlflow.log_metric("grpo_kl", metrics["kl_loss"], step=iteration)
+                mlflow.log_metric("grpo_mean_reward", metrics["mean_reward"], step=iteration)
+                
+                # 画面の進捗バーの表示を更新
+                progress.set_postfix(
+                    loss=f"{metrics['loss']:.4f}",
+                    kl=f"{metrics['kl_loss']:.4f}",
+                    reward=f"{metrics['mean_reward']:+.2f}"
+                )
+                
+                # 定期的にモデルのチェックポイントを保存
+                if iteration % save_every == 0:
+                    checkpoint_path = Path(self.cfg.train.output_root) / f"grpo_checkpoint_{iteration}.pt"
+                    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save({
+                        "model_state_dict": self.agent.policy.state_dict(),
+                        "config": OmegaConf.to_container(self.cfg, resolve=True),
+                        "iteration": iteration
+                    }, checkpoint_path)
+                    print(f"\nSaved checkpoint to {checkpoint_path}")

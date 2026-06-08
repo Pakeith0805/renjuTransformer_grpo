@@ -1,5 +1,6 @@
 # config/config_grpo.yaml
 defaults:
+  - data: default
   - model: transformer
   - train: default
   - optimizer: adamw
@@ -15,5 +16,6 @@ grpo:
   checkpoint_path: artifacts/checkpoints/best_model.pt
   group_size: 8         # 1局面あたりにサンプリングする手の数 (G)
   beta: 0.04            # KLペナルティの強さの係数
+  clip_eps: 0.2 
   temperature: 1.0      # サンプリング時の温度
   epochs: 5             # 強化学習の総エポック数 (テスト用)
