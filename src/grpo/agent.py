@@ -46,11 +46,15 @@ class GRPOAgent:
     
     def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0) -> float:
         board = initial_board_state.copy()
-        board[first_move_idx] = 1 # プレイヤー1が石を置く
+        # 1. 開始局面における手番プレイヤー（1:黒 または 2:白）を判定
+        first_player = infer_player(board)
         
-        winner = winner_after_move(board, first_move_idx, 1) # 終了判定
+        # 2. 判定されたプレイヤーの石を置く
+        board[first_move_idx] = first_player
+        
+        winner = winner_after_move(board, first_move_idx, first_player) # 終了判定
         if winner is not None:
-            return (1.0 if winner == 1 else -1.0), board # 勝ちなら1、負けなら-1
+            return (1.0 if winner == first_player else -1.0), board # 勝ちなら1、負けなら-1
         
         for ply in range(2, max_plies + 1):
             current_player = infer_player(board)
@@ -72,7 +76,7 @@ class GRPOAgent:
 
             winner = winner_after_move(board, move_idx, current_player)
             if winner is not None:
-                return (1.0 if winner == 1 else -1.0), board
+                return (1.0 if winner == first_player else -1.0), board
             
         return 0.0, board
 

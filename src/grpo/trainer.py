@@ -6,6 +6,8 @@ from omegaconf import OmegaConf
 import mlflow
 from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black
 from torch.distributions import Categorical
+from grpo.load_model import print_board
+
 
 # 報酬を受け取ってアドバンテージを返す関数
 def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -38,10 +40,12 @@ class GRPOTrainer:
 
         # 報酬を回収
         rewards = []
+        last_final_board = None
 
         for i in range(8):
-            reward, _ = self.agent.rollout_single_game(board_state, actions[i].item())
+            reward, board = self.agent.rollout_single_game(board_state, actions[i].item())
             rewards.append(reward)
+            last_final_board = board
 
         advantages = compute_group_advantages(rewards)
 
@@ -73,7 +77,8 @@ class GRPOTrainer:
             "policy_loss": policy_loss.item(),
             "kl_loss": kl_loss.item(),
             "mean_reward": mean_reward,
-            "rewards": rewards  # 個々の勝敗ログ
+            "rewards": rewards,  # 個々の勝敗ログ
+            "final_board": last_final_board
         }
     
     def collect_trajectory_boards(self) -> list[list[int]]:
@@ -209,6 +214,10 @@ class GRPOTrainer:
                     kl=f"{metrics['kl_loss']:.4f}",
                     reward=f"{metrics['mean_reward']:+.2f}"
                 )
+                
+                # 1イテレーション（エポック）終了ごとに、自己対戦の最終盤面を表示
+                print(f"\n[Iteration {iteration}] Self-Play Sample Final Board:")
+                print_board(metrics["final_board"])
                 
                 # 定期的にモデルのチェックポイントを保存
                 if iteration % save_every == 0:
