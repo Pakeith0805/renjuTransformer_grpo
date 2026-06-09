@@ -175,47 +175,48 @@ class GRPOTrainer:
             
             progress = tqdm(range(1, num_iterations + 1), desc="GRPO Iterations")
             for iteration in progress:
+                start_board = initial_board
 
                 if not trajectory_boards or random.random() > sample_prob:
                     start_board = initial_board
 
-                    if iteration % 5 == 0 or not trajectory_boards:
-                        new_boards = self.collect_trajectory_boards()
-                        trajectory_boards.extend(new_boards)
+                if iteration % 5 == 0 or not trajectory_boards:
+                    new_boards = self.collect_trajectory_boards()
+                    trajectory_boards.extend(new_boards)
 
-                        if len(trajectory_boards) > 300:
-                            trajectory_boards = trajectory_boards[-300:]
-                    else:
-                        # 盤面をランダムに選ぶ
-                        start_board = random.choice(trajectory_boards)
+                    if len(trajectory_boards) > 300:
+                        trajectory_boards = trajectory_boards[-300:]
+                else:
+                    # 盤面をランダムに選ぶ
+                    start_board = random.choice(trajectory_boards)
 
-                    # 選ばれた局面から1訓練
-                    # 初期盤面から 8 通り試して Policy を更新 (1回の学習ステップ)
-                    metrics = self.train_step(
-                        start_board, 
-                        beta=self.cfg.grpo.beta, 
-                        clip_eps=self.cfg.grpo.clip_eps
-                    )
+                # 選ばれた局面から1訓練
+                # 初期盤面から 8 通り試して Policy を更新 (1回の学習ステップ)
+                metrics = self.train_step(
+                    start_board, 
+                    beta=self.cfg.grpo.beta, 
+                    clip_eps=self.cfg.grpo.clip_eps
+                )
                 
-                    # メトリクス（Loss、KL、平均報酬）を MLflow に記録
-                    mlflow.log_metric("grpo_loss", metrics["loss"], step=iteration)
-                    mlflow.log_metric("grpo_kl", metrics["kl_loss"], step=iteration)
-                    mlflow.log_metric("grpo_mean_reward", metrics["mean_reward"], step=iteration)
+                # メトリクス（Loss、KL、平均報酬）を MLflow に記録
+                mlflow.log_metric("grpo_loss", metrics["loss"], step=iteration)
+                mlflow.log_metric("grpo_kl", metrics["kl_loss"], step=iteration)
+                mlflow.log_metric("grpo_mean_reward", metrics["mean_reward"], step=iteration)
                 
-                    # 画面の進捗バーの表示を更新
-                    progress.set_postfix(
-                        loss=f"{metrics['loss']:.4f}",
-                        kl=f"{metrics['kl_loss']:.4f}",
-                        reward=f"{metrics['mean_reward']:+.2f}"
-                    )
+                # 画面の進捗バーの表示を更新
+                progress.set_postfix(
+                    loss=f"{metrics['loss']:.4f}",
+                    kl=f"{metrics['kl_loss']:.4f}",
+                    reward=f"{metrics['mean_reward']:+.2f}"
+                )
                 
-                    # 定期的にモデルのチェックポイントを保存
-                    if iteration % save_every == 0:
-                        checkpoint_path = Path(self.cfg.train.output_root) / f"grpo_checkpoint_{iteration}.pt"
-                        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                        torch.save({
-                            "model_state_dict": self.agent.policy.state_dict(),
-                            "config": OmegaConf.to_container(self.cfg, resolve=True),
-                            "iteration": iteration
-                        }, checkpoint_path)
-                        print(f"\nSaved checkpoint to {checkpoint_path}")
+                # 定期的にモデルのチェックポイントを保存
+                if iteration % save_every == 0:
+                    checkpoint_path = Path(self.cfg.train.output_root) / f"grpo_checkpoint_{iteration}.pt"
+                    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save({
+                        "model_state_dict": self.agent.policy.state_dict(),
+                        "config": OmegaConf.to_container(self.cfg, resolve=True),
+                        "iteration": iteration
+                    }, checkpoint_path)
+                    print(f"\nSaved checkpoint to {checkpoint_path}")
