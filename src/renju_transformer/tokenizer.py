@@ -34,7 +34,7 @@ class RenjuTokenizer:
     def vocab_size(self) -> int:
         return self.sep_token_id + 1
 
-    # リストの長さが225であること、かつ含まれる値が0か1か2のどれかであることを確認
+    # リストの長さが225であること、かつ含まれる値が0か1か2のどれかであることを確認。
     def validate_board(self, board: list[int]) -> None:
         if len(board) != self.board_cells:
             raise ValueError(f"Expected {self.board_cells} cells, got {len(board)}.")
@@ -70,10 +70,10 @@ class RenjuTokenizer:
 
     # 
     def encode_csv_row(self, row: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        expected_length = self.board_cells + 2
+        expected_length = self.board_cells + 2 # 盤面＋セパレータ＋指し手
         if len(row) != expected_length:
             raise ValueError(f"Expected {expected_length} columns, got {len(row)}.")
-        board = row[: self.board_cells]
+        board = row[: self.board_cells] # 
         sep = row[self.board_cells]
         if sep != self.sep_token_id:
             raise ValueError(f"Expected SEP token {self.sep_token_id}, got {sep}.")

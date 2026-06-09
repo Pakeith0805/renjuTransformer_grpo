@@ -192,7 +192,7 @@ class GRPOTrainer:
                     # 選ばれた局面から1訓練
                     # 初期盤面から 8 通り試して Policy を更新 (1回の学習ステップ)
                     metrics = self.train_step(
-                        initial_board, 
+                        start_board, 
                         beta=self.cfg.grpo.beta, 
                         clip_eps=self.cfg.grpo.clip_eps
                     )
