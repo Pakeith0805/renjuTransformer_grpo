@@ -972,3 +972,90 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 }
+
+#ifdef _WIN32
+#define DLL_EXPORT __declspec(dllexport)
+#else
+#define DLL_EXPORT
+#endif
+
+extern "C" {
+    DLL_EXPORT double run_mcts_c_api(const int* board_array, int move_idx, int simulations, std::uint64_t seed) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            int move = move_idx;
+
+            if (board[static_cast<std::size_t>(move)] != EMPTY) {
+                return 0.0;
+            }
+
+            const auto [black_count, white_count] = stone_counts(board);
+            const int player = (black_count == white_count) ? BLACK : WHITE;
+
+            if (player == BLACK && is_forbidden_for_black(board, move)) {
+                return 0.0;
+            }
+
+            Board next_board = board_with_move(board, move, player);
+            const int immediate_winner = winner_after_move(next_board, move, player);
+
+            if (immediate_winner != NO_WINNER) {
+                double rate = (immediate_winner == player) ? 1.0 : 0.0;
+                return rate;
+            }
+
+            Options options;
+            options.simulations = simulations;
+            options.has_seed = true;
+            options.seed = seed;
+
+            std::mt19937_64 rng(seed);
+            const int next_player = other_player(player);
+            const std::vector<int> root_moves = generate_policy_moves(next_board, next_player, options.candidate_limit);
+
+            if (root_moves.empty()) {
+                double rate = board_is_full(next_board) ? 0.5 : 0.0;
+                return rate;
+            }
+
+            MCTSNode root(next_board, next_player, player, options.candidate_limit);
+            root.untried_moves = root_moves;
+
+            for (int simulation = 0; simulation < options.simulations; ++simulation) {
+                MCTSNode* node = &root;
+
+                while (!node->is_terminal() && node->fully_expanded() && !node->children.empty()) {
+                    node = node->best_child(options.exploration);
+                }
+
+                if (!node->is_terminal() && !node->untried_moves.empty()) {
+                    node = node->expand(rng);
+                }
+
+                int winner = DRAW;
+                if (node->is_terminal()) {
+                    winner = node->terminal_winner;
+                } else {
+                    winner = rollout(node->board, node->player_to_move, options, rng);
+                }
+
+                while (node != nullptr) {
+                    node->update(winner);
+                    node = node->parent;
+                }
+            }
+
+            double win_rate = 0.5;
+            if (root.visits > 0) {
+                win_rate = root.wins / static_cast<double>(root.visits);
+            }
+            return win_rate;
+        } catch (...) {
+            return 0.5;
+        }
+    }
+}
+

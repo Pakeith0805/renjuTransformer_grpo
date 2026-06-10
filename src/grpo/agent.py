@@ -1,5 +1,6 @@
 import sys
-import subprocess
+import os
+import ctypes
 import concurrent.futures
 from pathlib import Path
 import torch
@@ -7,27 +8,34 @@ from torch.distributions import Categorical
 
 from renju_transformer.rules import infer_player, winner_after_move
 
+# DLLのロードと関数の初期化
+_mcts_lib = None
+
+def _get_mcts_lib():
+    global _mcts_lib
+    if _mcts_lib is None:
+        dll_path = Path("mcts.dll").absolute()
+        if not dll_path.exists():
+            raise FileNotFoundError(f"mcts.dll not found at {dll_path}. Please build it first.")
+        
+        _mcts_lib = ctypes.CDLL(str(dll_path))
+        _mcts_lib.run_mcts_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int), # board_array
+            ctypes.c_int,                 # move_idx
+            ctypes.c_int,                 # simulations
+            ctypes.c_uint64               # seed
+        ]
+        _mcts_lib.run_mcts_c_api.restype = ctypes.c_double
+    return _mcts_lib
+
 def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42) -> float:
-    board_str = ",".join(map(str, board))
-    
-    exe_path = Path("mcts.exe").absolute()
-    cmd = [
-        str(exe_path),
-        "--eval",
-        "--board", board_str,
-        "--move", str(move_idx),
-        "--simulations", str(simulations),
-        "--seed", str(seed)
-    ]
-    
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        for line in result.stdout.splitlines():
-            if line.startswith("win_rate="):
-                return float(line.split("=")[1])
-        raise ValueError("MCTS did not output win_rate")
+        lib = _get_mcts_lib()
+        board_array = (ctypes.c_int * 225)(*board)
+        win_rate = lib.run_mcts_c_api(board_array, move_idx, simulations, seed)
+        return win_rate
     except Exception as e:
-        print(f"Error running MCTS eval: {e}", file=sys.stderr)
+        print(f"Error running MCTS eval (DLL): {e}", file=sys.stderr)
         return 0.5
 
 class GRPOAgent:
