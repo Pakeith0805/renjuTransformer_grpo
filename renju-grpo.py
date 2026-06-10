@@ -66,11 +66,13 @@ def main(cfg: DictConfig) -> None:
     )
     
     # 6. Agent と Trainer のインスタンス化
+    mcts_simulations = cfg.grpo.get("mcts_simulations", 200) # cfgからシミュレーション回数をとってくる。あればその値を、なければ200を。
     agent = GRPOAgent(
         policy_model=policy_model,
         ref_model=ref_model,
         tokenizer=tokenizer,
-        device=device
+        device=device,
+        mcts_simulations=mcts_simulations
     )
     
     trainer = GRPOTrainer(

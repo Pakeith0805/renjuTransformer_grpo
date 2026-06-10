@@ -38,14 +38,9 @@ class GRPOTrainer:
             temperature=self.cfg.grpo.temperature
         )
 
-        # 報酬を回収
-        rewards = []
-        last_final_board = None
-
-        for i in range(8):
-            reward, board = self.agent.rollout_single_game(board_state, actions[i].item())
-            rewards.append(reward)
-            last_final_board = board
+        # 報酬を回収 (並列 MCTS 評価)
+        move_indices = [actions[i].item() for i in range(len(actions))]
+        rewards, last_final_board = self.agent.rollout_group(board_state, move_indices)
 
         advantages = compute_group_advantages(rewards)
 

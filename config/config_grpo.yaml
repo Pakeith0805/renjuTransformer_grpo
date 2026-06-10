@@ -20,3 +20,4 @@ grpo:
   temperature: 1.0      # サンプリング時の温度
   epochs: 5             # 強化学習の総エポック数 (テスト用)
   trajectory_sample_prob: 0.8
+  mcts_simulations: 200
