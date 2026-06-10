@@ -70,7 +70,7 @@ def print_board(board_state: list[int]):
     symbols = {0: " . ", 1: " ● ", 2: " ○ "}
     
     print("\n   " + " ".join(f"{col:2d}" for col in range(15)))  # 列番号ヘッダー
-    print("  " + "—" * 46)
+    print("  " + "-" * 46)
     
     for row in range(15):
         row_str = f"{row:2d} |"
@@ -78,7 +78,7 @@ def print_board(board_state: list[int]):
             cell_idx = row * 15 + col
             row_str += symbols[board_state[cell_idx]]
         print(row_str)
-    print("  " + "—" * 46 + "\n")
+    print("  " + "-" * 46 + "\n")
 
 
 # 動作確認用のメイン処理の例

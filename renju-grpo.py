@@ -44,6 +44,16 @@ def main(cfg: DictConfig) -> None:
     print(f"Loading checkpoint from: {cfg.grpo.checkpoint_path}")
     policy_model, ref_model = load_policy_and_reference(cfg.grpo.checkpoint_path, device)
     
+    # 4.5. チェックポイントから開始イテレーションを推測
+    start_iteration = 1
+    try:
+        checkpoint = torch.load(cfg.grpo.checkpoint_path, map_location="cpu", weights_only=False)
+        if "iteration" in checkpoint:
+            start_iteration = checkpoint["iteration"] + 1
+            print(f"Resuming training from iteration: {start_iteration}")
+    except Exception:
+        pass
+    
     # 5. オプティマイザの初期化
     # 【重要】更新対象として policy_model のパラメータ「のみ」を渡します
     # (ref_model のパラメータは渡さないことで、確実に固定させます)
@@ -81,7 +91,9 @@ def main(cfg: DictConfig) -> None:
     # (繰り返し回数は config_grpo.yaml で指定した epochs 数になります)
     trainer.train(
         num_iterations=cfg.grpo.epochs,
-        save_every=50
+        save_every=50,
+        run_id=cfg.mlflow.get("run_id", None),
+        start_iteration=start_iteration
     )
 
 if __name__ == "__main__":

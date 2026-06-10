@@ -163,7 +163,7 @@ class GRPOTrainer:
     
     # src/grpo/trainer.py 内の GRPOTrainer クラスに追記
 
-    def train(self, num_iterations: int = 1000, save_every: int = 50):
+    def train(self, num_iterations: int = 1000, save_every: int = 50, run_id: str = None, start_iteration: int = 1):
         """
         強化学習（GRPO）のメインループを実行します (初期盤面のみのシンプルテスト版)。
         """
@@ -176,9 +176,9 @@ class GRPOTrainer:
         sample_prob = self.cfg.grpo.get("trajectory_sample_prob", 0.8)
         
         # MLflow の実験コンテキストを開始
-        with mlflow.start_run(run_name=self.cfg.mlflow.run_name_prefix + "-grpo", nested=True):
+        with mlflow.start_run(run_id=run_id, run_name=self.cfg.mlflow.run_name_prefix + "-grpo", nested=True):
             
-            progress = tqdm(range(1, num_iterations + 1), desc="GRPO Iterations")
+            progress = tqdm(range(start_iteration, start_iteration + num_iterations), desc="GRPO Iterations")
             for iteration in progress:
                 start_board = initial_board
 

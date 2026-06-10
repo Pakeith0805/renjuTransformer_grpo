@@ -1,0 +1,16 @@
+# config/config_versus.yaml
+defaults:
+  - data: default
+  - model: transformer
+  - train: default
+  - _self_
+
+mode: versus
+seed: 42
+
+versus:
+  model_a_path: artifacts/checkpoints/best_model.pt
+  model_b_path: ???  # This must be overridden via command line or modified by user
+  num_games: 20       # Should be an even number so both models play black and white equally
+  temperature: 0.0    # 0.0 for argmax (deterministic), >0.0 for sampling
+  device: auto
