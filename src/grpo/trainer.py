@@ -81,7 +81,7 @@ class GRPOTrainer:
         boards = [board.copy()]
 
         input_ids = self.agent.tokenizer.encode_input(board).unsqueeze(0).to(self.agent.device)
-        legal_mask = torch.tensor([cell == 0 for cell in board], dtype = torch.bool, device = self.agent.device)
+        legal_mask = self.agent.tokenizer.legal_move_mask(board).to(self.agent.device)
 
         with torch.no_grad():
             logits = self.agent.policy(input_ids).squeeze(0)
@@ -90,17 +90,13 @@ class GRPOTrainer:
             dist = Categorical(probs=probs)
             move_idx = dist.sample().item()
         
-        empty_board = [0] * len(board)
-        if is_forbidden_for_black(empty_board, move_idx):
-            return boards # 1手目で終わり
-        
         board[move_idx] = 1
         boards.append(board.copy())
 
         # 2手目以降、ゲーム終了まで打つ
         for ply in range(2, 226):
             current_player = infer_player(board)
-            legal_mask = torch.tensor([cell == 0 for cell in board], dtype = torch.bool, device=self.agent.device)
+            legal_mask = self.agent.tokenizer.legal_move_mask(board).to(self.agent.device)
             if not legal_mask.any():
                 break
 
@@ -112,10 +108,6 @@ class GRPOTrainer:
                 probs = torch.softmax(masked_logits / self.cfg.grpo.temperature, dim = -1)
                 dist = Categorical(probs=probs)
                 move_idx = dist.sample().item()
-
-            if current_player == 1:
-                if is_forbidden_for_black(board, move_idx):
-                    break
 
             board[move_idx] = current_player
             boards.append(board.copy())
