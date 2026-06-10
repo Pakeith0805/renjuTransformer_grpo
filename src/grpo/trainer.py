@@ -78,20 +78,8 @@ class GRPOTrainer:
     
     def collect_trajectory_boards(self) -> list[list[int]]:
         board = [0] * 225
+        board[112] = 1  # 1手目は天元に固定。ルールだから
         boards = [board.copy()]
-
-        input_ids = self.agent.tokenizer.encode_input(board).unsqueeze(0).to(self.agent.device)
-        legal_mask = self.agent.tokenizer.legal_move_mask(board).to(self.agent.device)
-
-        with torch.no_grad():
-            logits = self.agent.policy(input_ids).squeeze(0)
-            masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
-            probs = torch.softmax(masked_logits / self.cfg.grpo.temperature, dim=-1)
-            dist = Categorical(probs=probs)
-            move_idx = dist.sample().item()
-        
-        board[move_idx] = 1
-        boards.append(board.copy())
 
         # 2手目以降、ゲーム終了まで打つ
         for ply in range(2, 226):
