@@ -1153,7 +1153,10 @@ int main(int argc, char* argv[]) {
 #define DLL_EXPORT
 #endif
 
+// モンテカルロ木探索のメインループを実行して、指定した手の評価値を返す関数。
+// pythonからこのC APIを呼び出せる
 extern "C" {
+    // pythonから呼び出せるapi。モンテカルロ木探索のメインループを実行する。
     DLL_EXPORT double run_mcts_c_api(const int* board_array, int move_idx, int simulations, std::uint64_t seed) {
         try {
             Board board;
