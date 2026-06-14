@@ -103,6 +103,9 @@ def main(cfg: DictConfig) -> None:
                     probs = torch.softmax(masked_logits / temperature, dim=-1)
                     dist = torch.distributions.Categorical(probs=probs)
                     move_idx = dist.sample().item()
+
+                # current_entropy = torch.distributions.Categorical(probs=probs).entropy().item()
+                # print(f"[DEBUG] Current Ply Entropy: {current_entropy:.3f}")
             
             board[move_idx] = current_player
             plies += 1
@@ -132,9 +135,8 @@ def main(cfg: DictConfig) -> None:
                 print(f"  Result: Model B won in {plies} plies ({'White' if is_model_a_black else 'Black'})")
                 
         # Print the final board state of the very last match
-        if game_idx == num_games:
-            print("\nFinal Game Board State:")
-            print_board(board)
+        print("\nFinal Game Board State:")
+        print_board(board)
             
     # Calculate stats
     a_wins = stats["a_wins_black"] + stats["a_wins_white"]
