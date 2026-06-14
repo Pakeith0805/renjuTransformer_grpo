@@ -1,5 +1,7 @@
 import torch
 import random
+import gzip
+import csv
 from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf
@@ -7,6 +9,35 @@ import mlflow
 from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black
 from torch.distributions import Categorical
 from grpo.load_model import print_board
+
+def load_initial_trajectory_boards(csv_gz_path: Path, num_samples: int = 300) -> list[list[int]]:
+    boards = []
+    if not csv_gz_path.exists():
+        print(f"Warning: {csv_gz_path} not found. Starting with empty trajectory pool.")
+        return boards
+    print(f"Pre-loading {num_samples} initial boards from {csv_gz_path}...")
+    try:
+        with gzip.open(csv_gz_path, mode="rt", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            all_lines = []
+            for i, row in enumerate(reader):
+                if not row or len(row) < 225:
+                    continue
+                try:
+                    # 最初の225列（盤面）を数値のリストとして抽出
+                    board = [int(cell) for cell in row[:225]]
+                    all_lines.append(board)
+                except ValueError:
+                    continue
+                if i > 20000:  # メモリと速度の観点から最初の2万行でサンプリングを打ち切る
+                    break
+            if all_lines:
+                boards = random.sample(all_lines, min(num_samples, len(all_lines)))
+                print(f"Successfully loaded {len(boards)} boards.")
+    except Exception as e:
+        print(f"Warning: Failed to load initial boards: {e}. Starting with empty trajectory pool.")
+        boards = []
+    return boards
 
 
 # 報酬を受け取ってアドバンテージを返す関数
@@ -22,14 +53,12 @@ def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1
     return advantages
 
 
-
 class GRPOTrainer:
     def __init__(self, agent, optimizer, cfg):
         self.agent = agent
         self.optimizer = optimizer
         self.cfg = cfg
 
-    # 
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
         actions, log_probs_policy, log_probs_ref = self.agent.get_group_actions(
@@ -88,14 +117,18 @@ class GRPOTrainer:
             if not legal_mask.any():
                 break
 
-            input_ids = self.agent.tokenizer.encode_input(board).unsqueeze(0).to(self.agent.device)
+            # 【変更】従来のモデル直感からのワンショットサンプリングはコメントアウトにします。
+            # 理由: より高品質でバグのない学習対局データを生成するため、
+            #      モデルにガイドされたMCTS探索（PUCT, シミュレーション回数1000回）によって指し手を決定するように移行。
+            # input_ids = self.agent.tokenizer.encode_input(board).unsqueeze(0).to(self.agent.device)
+            # with torch.no_grad():
+            #     logits = self.agent.policy(input_ids).squeeze(0)
+            #     masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
+            #     probs = torch.softmax(masked_logits / self.cfg.grpo.temperature, dim = -1)
+            #     dist = Categorical(probs=probs)
+            #     move_idx = dist.sample().item()
 
-            with torch.no_grad():
-                logits = self.agent.policy(input_ids).squeeze(0)
-                masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
-                probs = torch.softmax(masked_logits / self.cfg.grpo.temperature, dim = -1)
-                dist = Categorical(probs=probs)
-                move_idx = dist.sample().item()
+            move_idx = self.agent.select_move_via_mcts(board, simulations=1000)
 
             board[move_idx] = current_player
             boards.append(board.copy())
@@ -105,8 +138,6 @@ class GRPOTrainer:
                 break
 
         return boards
-
-
 
     # 損失関数を返す関数
     def compute_grpo_loss(
@@ -136,17 +167,31 @@ class GRPOTrainer:
 
         return total_loss, policy_loss, kl_loss
     
-    # src/grpo/trainer.py 内の GRPOTrainer クラスに追記
-
     def train(self, num_iterations: int = 1000, save_every: int = 50, run_id: str = None, start_iteration: int = 1):
         """
         強化学習（GRPO）のメインループを実行します (初期盤面のみのシンプルテスト版)。
         """
         print(f"Starting simple GRPO training for {num_iterations} iterations...")
         
-        # 初期盤面 (225マスの空盤面) を作成
         initial_board = [0] * 225
         trajectory_boards = []
+        
+        # チェックポイントからの途中再開時（start_iteration > 1）は、プール局面の復元を試みる
+        if start_iteration > 1:
+            try:
+                checkpoint_path = Path(self.cfg.grpo.checkpoint_path)
+                if checkpoint_path.exists():
+                    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                    if "trajectory_boards" in checkpoint:
+                        trajectory_boards = checkpoint["trajectory_boards"]
+                        print(f"Restored {len(trajectory_boards)} trajectory boards from checkpoint.")
+            except Exception as e:
+                print(f"Warning: Failed to restore trajectory_boards from checkpoint: {e}")
+
+        # プールが空の場合（新規開始、またはチェックポイントに無かった場合）のみ、data.csv.gz からコールドスタート局面をロード
+        if not trajectory_boards:
+            csv_gz_path = Path("data.csv.gz").absolute()
+            trajectory_boards = load_initial_trajectory_boards(csv_gz_path, num_samples=300)
 
         sample_prob = self.cfg.grpo.get("trajectory_sample_prob", 0.8)
         
@@ -156,14 +201,14 @@ class GRPOTrainer:
             progress = tqdm(range(start_iteration, start_iteration + num_iterations), desc="GRPO Iterations")
             for iteration in progress:
                 start_board = initial_board
-
+ 
                 if not trajectory_boards or random.random() > sample_prob:
                     start_board = initial_board
-
-                if iteration % 5 == 0 or not trajectory_boards:
+ 
+                if iteration % 100 == 0 or not trajectory_boards:
                     new_boards = self.collect_trajectory_boards()
                     trajectory_boards.extend(new_boards)
-
+ 
                     if len(trajectory_boards) > 300:
                         trajectory_boards = trajectory_boards[-300:]
                 else:
@@ -201,6 +246,7 @@ class GRPOTrainer:
                     torch.save({
                         "model_state_dict": self.agent.policy.state_dict(),
                         "config": OmegaConf.to_container(self.cfg, resolve=True),
-                        "iteration": iteration
+                        "iteration": iteration,
+                        "trajectory_boards": trajectory_boards  # 局面プールも保存して途中再開できるようにする
                     }, checkpoint_path)
                     print(f"\nSaved checkpoint to {checkpoint_path}")

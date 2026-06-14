@@ -544,6 +544,7 @@ struct MCTSNode {
     int terminal_winner = NO_WINNER;
     double wins = 0.0;
     int visits = 0;
+    double prior_prob = 1.0; // Prior probability from policy model (default: 1.0)
     std::vector<int> untried_moves;
     std::vector<std::unique_ptr<MCTSNode>> children;
 
@@ -555,7 +556,8 @@ struct MCTSNode {
         int candidate_limit_value,
         int move_played_value = -1,
         MCTSNode* parent_value = nullptr,
-        int known_winner = NO_WINNER
+        int known_winner = NO_WINNER,
+        double prior_prob_value = 1.0
     )
         : board(board_value),
           player_to_move(player_value),
@@ -563,7 +565,8 @@ struct MCTSNode {
           candidate_limit(candidate_limit_value),
           move_played(move_played_value),
           parent(parent_value),
-          terminal_winner(known_winner) {
+          terminal_winner(known_winner),
+          prior_prob(prior_prob_value) {
         if (terminal_winner == NO_WINNER) {
             terminal_winner = board_winner(board);
         }
@@ -598,11 +601,11 @@ struct MCTSNode {
         if (children.empty()) {
             throw std::runtime_error("best_child called on a node with no children.");
         }
-        const double log_visits = std::log(static_cast<double>(visits));
+        const double sqrt_visits = std::sqrt(static_cast<double>(visits));
         auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
             const double exploitation = child->wins / static_cast<double>(child->visits);
             const double exploration_term =
-                exploration * std::sqrt(log_visits / static_cast<double>(child->visits));
+                exploration * child->prior_prob * sqrt_visits / (1.0 + child->visits);
             return exploitation + exploration_term;
         };
         const auto best_it = std::max_element(children.begin(), children.end(), [&](const auto& lhs, const auto& rhs) {
@@ -1210,6 +1213,96 @@ extern "C" {
 
                 if (!node->is_terminal() && !node->untried_moves.empty()) {
                     node = node->expand(rng);
+                }
+
+                int winner = DRAW;
+                if (node->is_terminal()) {
+                    winner = node->terminal_winner;
+                } else {
+                    winner = rollout(node->board, node->player_to_move, options, rng);
+                }
+
+                while (node != nullptr) {
+                    node->update(winner);
+                    node = node->parent;
+                }
+            }
+
+            double win_rate = 0.5;
+            if (root.visits > 0) {
+                win_rate = root.wins / static_cast<double>(root.visits);
+            }
+            return win_rate;
+        } catch (...) {
+            return 0.5;
+        }
+    }
+
+    // 新API: 事前確率(prior_probs)を用いてモデルにガイドされたPUCT探索を行う
+    DLL_EXPORT double run_mcts_c_api_with_policy(
+        const int* board_array, 
+        int move_idx, 
+        int simulations, 
+        std::uint64_t seed,
+        const double* prior_probs
+    ) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            int move = move_idx;
+
+            if (board[static_cast<std::size_t>(move)] != EMPTY) {
+                return 0.0;
+            }
+
+            const auto [black_count, white_count] = stone_counts(board);
+            const int player = (black_count == white_count) ? BLACK : WHITE;
+
+            if (player == BLACK && is_forbidden_for_black(board, move)) {
+                return 0.0;
+            }
+
+            Board next_board = board_with_move(board, move, player);
+            const int immediate_winner = winner_after_move(next_board, move, player);
+
+            if (immediate_winner != NO_WINNER) {
+                double rate = (immediate_winner == player) ? 1.0 : 0.0;
+                return rate;
+            }
+
+            Options options;
+            options.simulations = simulations;
+            options.has_seed = true;
+            options.seed = seed;
+
+            std::mt19937_64 rng(seed);
+            const int next_player = other_player(player);
+            const std::vector<int> root_moves = generate_policy_moves(next_board, next_player, options.candidate_limit);
+
+            if (root_moves.empty()) {
+                double rate = board_is_full(next_board) ? 0.5 : 0.0;
+                return rate;
+            }
+
+            MCTSNode root(next_board, next_player, player, options.candidate_limit);
+            root.untried_moves = root_moves;
+
+            for (int simulation = 0; simulation < options.simulations; ++simulation) {
+                MCTSNode* node = &root;
+
+                while (!node->is_terminal() && node->fully_expanded() && !node->children.empty()) {
+                    node = node->best_child(options.exploration);
+                }
+
+                if (!node->is_terminal() && !node->untried_moves.empty()) {
+                    MCTSNode* parent_node = node;
+                    node = node->expand(rng);
+                    // ルートの直下に展開したノードには、渡された事前確率を割り当てる
+                    if (parent_node == &root && prior_probs != nullptr) {
+                        node->prior_prob = prior_probs[node->move_played];
+                    }
                 }
 
                 int winner = DRAW;
