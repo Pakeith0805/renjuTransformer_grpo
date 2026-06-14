@@ -33,8 +33,12 @@ constexpr int DEFAULT_CANDIDATE_LIMIT = 16;
 constexpr int DEFAULT_ROLLOUT_LIMIT = 16;
 constexpr double DEFAULT_EXPLORATION = 1.4;
 
-using Board = std::array<int, BOARD_CELLS>;
+// 要素数225の整数配列にboardという名前をつけている。usingは別名定義(型エイリアス)
+//std::arrayは固定長配列の定義。
+//<要素の型, 要素数>
+using Board = std::array<int, BOARD_CELLS>; 
 
+// 方向を表すタプルのリスト。固定値。
 const std::array<std::pair<int, int>, 4> DIRECTIONS = {
     std::make_pair(1, 0),
     std::make_pair(0, 1),
@@ -42,18 +46,25 @@ const std::array<std::pair<int, int>, 4> DIRECTIONS = {
     std::make_pair(1, -1),
 };
 
+// 構造体。これを定義しておくと、引数に構造体を渡すだけで終わり。
 struct Options {
-    std::uint64_t games = 0;
-    int simulations = DEFAULT_SIMULATIONS;
-    int parallel = 1;
-    int candidate_limit = DEFAULT_CANDIDATE_LIMIT;
-    int rollout_limit = DEFAULT_ROLLOUT_LIMIT;
-    double exploration = DEFAULT_EXPLORATION;
-    bool trace_plies = false;
-    bool has_seed = false;
+    std::uint64_t games = 0; // 実行するゲーム数
+    int simulations = DEFAULT_SIMULATIONS; // 1手当たりのmctsシミュレーション回数
+    int parallel = 1; // 並列実行するスレッド数 
+    int candidate_limit = DEFAULT_CANDIDATE_LIMIT; // 探索候補手の上限数。上位何個を調べるか
+    int rollout_limit = DEFAULT_ROLLOUT_LIMIT; // ロールアウトの最大手数
+    double exploration = DEFAULT_EXPLORATION; // UCTの探索係数C。この値を大きくすると、まだあまり探索していない未踏の手を優先的に調べようとする。
+    bool trace_plies = false; // 手番ごとの進捗ログを出力するかどうか。これをtrueにしておくと、デバックに有効
+    bool has_seed = false; // 乱数シード値がコマンドラインから手動で指定されたかどうかのフラグ。falseならランダム。
     std::uint64_t seed = 0;
+
+    // EVAL parameters
+    bool is_eval = false; // trueなら、与えられた局面と手番に関する期待勝率を一瞬で計算する。
+    std::string eval_board_str = ""; // 評価したい盤面状態を表す。
+    int eval_move = -1; // 次の一手のインデックス。
 };
 
+// 構造体。対局シミュレーションが一局終了した時に、その結果を返す。
 struct GameResult {
     int winner = DRAW;
     int plies = 0;
@@ -61,30 +72,37 @@ struct GameResult {
     std::string csv_rows;
 };
 
+// 引数なしでintを返す。天元を返す。
 int center_index() {
     return (BOARD_SIZE / 2) * BOARD_SIZE + (BOARD_SIZE / 2);
 }
 
+// 引数として行と列を受け取り、整数を返す。二次元座標を一次元配列のインデックスに変換する。
 int rc_to_idx(int row, int col) {
     return row * BOARD_SIZE + col;
 }
 
+// インデックスを2次元の座標に変換する
 std::pair<int, int> idx_to_rc(int index) {
     return {index / BOARD_SIZE, index % BOARD_SIZE};
 }
 
+// 座標が盤面に収まっているか判定し、boolを返す。
 bool inside(int row, int col) {
     return 0 <= row && row < BOARD_SIZE && 0 <= col && col < BOARD_SIZE;
 }
 
+// プレイヤー番号を入れると、相手プレイヤー番号を出力する
 int other_player(int player) {
     return player == BLACK ? WHITE : BLACK;
 }
 
+// 盤面に空きマスが一つも残っていないかを判定。残っていなければtrue
 bool board_is_full(const Board& board) {
     return std::none_of(board.begin(), board.end(), [](int cell) { return cell == EMPTY; });
 }
 
+// 盤面の石の数を数得て出力する。黒石と白石の数をそれぞれ。
 std::pair<int, int> stone_counts(const Board& board) {
     int black_count = 0;
     int white_count = 0;
@@ -98,12 +116,14 @@ std::pair<int, int> stone_counts(const Board& board) {
     return {black_count, white_count};
 }
 
+// 元の盤面を壊さず、指定の位置に石を置いた時の一手先の未来の盤面を返す
 Board board_with_move(const Board& board, int index, int player) {
     Board next_board = board;
     next_board[static_cast<std::size_t>(index)] = player;
     return next_board;
 }
 
+// 指定したマスに石を置いたとき、特定の方向に同じプレイヤーの石が何個連続して並んでいるかをカウントして返す
 int contiguous_count(const Board& board, int index, int player, int dr, int dc) {
     int total = 1;
     auto [row, col] = idx_to_rc(index);
@@ -125,6 +145,7 @@ int contiguous_count(const Board& board, int index, int player, int dr, int dc) 
     return total;
 }
 
+// 指定したマスに石をおいたとき、どこかの方向で5個以上連続して並ぶかを判定する
 bool has_five_or_more(const Board& board, int index, int player) {
     for (const auto& [dr, dc] : DIRECTIONS) {
         if (contiguous_count(board, index, player, dr, dc) >= 5) {
@@ -134,6 +155,7 @@ bool has_five_or_more(const Board& board, int index, int player) {
     return false;
 }
 
+// 指定したマスに石をおいたとき、どこかの方向で6個以上連続して並ぶかを判定する
 bool is_overline(const Board& board, int index, int player) {
     for (const auto& [dr, dc] : DIRECTIONS) {
         if (contiguous_count(board, index, player, dr, dc) >= 6) {
@@ -143,6 +165,7 @@ bool is_overline(const Board& board, int index, int player) {
     return false;
 }
 
+// 盤面全体をスキャンし、指定したプレイヤーが既に五連以上を達成しているかを判定する
 bool player_has_five(const Board& board, int player) {
     for (int index = 0; index < BOARD_CELLS; ++index) {
         if (board[static_cast<std::size_t>(index)] == player && has_five_or_more(board, index, player)) {
@@ -152,6 +175,7 @@ bool player_has_five(const Board& board, int player) {
     return false;
 }
 
+// 盤面全体をスキャンし、指定したプレイヤーが既に長連を達成しているかを判定する
 bool player_has_overline(const Board& board, int player) {
     for (int index = 0; index < BOARD_CELLS; ++index) {
         if (board[static_cast<std::size_t>(index)] == player && is_overline(board, index, player)) {
@@ -161,6 +185,7 @@ bool player_has_overline(const Board& board, int player) {
     return false;
 }
 
+// 盤面全体を走査して、既に勝敗が決しているかを判定
 int board_winner(const Board& board) {
     if (player_has_overline(board, BLACK)) {
         return WHITE;
@@ -174,6 +199,7 @@ int board_winner(const Board& board) {
     return NO_WINNER;
 }
 
+// 指定したマスを通り、特定の方向に延びる直線状の全マスのインデックスを端から端まで集めてリストにする
 std::vector<int> line_points_through(int index, int dr, int dc) {
     auto [row, col] = idx_to_rc(index);
     while (inside(row - dr, col - dc)) {
@@ -190,6 +216,7 @@ std::vector<int> line_points_through(int index, int dr, int dc) {
     return points;
 }
 
+// 指定した直線状に、そこにおけば即勝利になる空きマスがあるか探して、そのリストを返す
 std::vector<int> immediate_wins_in_direction(
     const Board& board,
     int player,
@@ -214,6 +241,7 @@ std::vector<int> immediate_wins_in_direction(
     return wins;
 }
 
+// 指定したマスに石を置いたとき、何方向に四連ができるかをカウントする
 int count_four_directions(const Board& board, int move, int player) {
     int count = 0;
     for (const auto& [dr, dc] : DIRECTIONS) {
@@ -225,6 +253,7 @@ int count_four_directions(const Board& board, int move, int player) {
     return count;
 }
 
+// 指定したマスに石を置いたとき、何方向で活三が出来るかをカウントする
 int count_open_three_directions(const Board& board, int move, int player) {
     int count = 0;
     for (const auto& [dr, dc] : DIRECTIONS) {
@@ -252,6 +281,7 @@ int count_open_three_directions(const Board& board, int move, int player) {
     return count;
 }
 
+// 指定したマスに黒石を置いたとき、黒の禁じ手になるかどうかを判定する
 bool is_forbidden_for_black(const Board& board, int index) {
     if (board[static_cast<std::size_t>(index)] != EMPTY) {
         return true;
@@ -276,6 +306,7 @@ bool is_forbidden_for_black(const Board& board, int index) {
     return false;
 }
 
+// 石を置いた直後に、そのプレイヤーの勝利が決まるかを判定する
 int winner_after_move(const Board& board, int index, int player) {
     if (player == BLACK && is_overline(board, index, BLACK)) {
         return WHITE;
@@ -286,6 +317,7 @@ int winner_after_move(const Board& board, int index, int player) {
     return NO_WINNER;
 }
 
+// 指定マスと盤面の中央との距離の二乗を算出する
 int center_distance_sq(int index) {
     auto [row, col] = idx_to_rc(index);
     const int center = BOARD_SIZE / 2;
@@ -294,6 +326,7 @@ int center_distance_sq(int index) {
     return dr * dr + dc * dc;
 }
 
+// 指定したマスの隣接する8マスに、既にどれだけ石が置かれているかをカウントする
 int local_density(const Board& board, int index) {
     auto [row, col] = idx_to_rc(index);
     int score = 0;
@@ -312,6 +345,7 @@ int local_density(const Board& board, int index) {
     return score;
 }
 
+// あるマスに石を置いたとき、その手の形がどれくらい協力かを数値化する
 double move_shape_score(const Board& board, int move, int player) {
     Board next_board = board_with_move(board, move, player);
     int longest = 0;
@@ -327,6 +361,7 @@ double move_shape_score(const Board& board, int move, int player) {
     return score;
 }
 
+// すでに石が置かれているマスのインデックスをすべて集めてリストにして返す
 std::vector<int> occupied_indexes(const Board& board) {
     std::vector<int> stones;
     stones.reserve(BOARD_CELLS);
@@ -338,6 +373,8 @@ std::vector<int> occupied_indexes(const Board& board) {
     return stones;
 }
 
+// おかれているすべての石の周囲一マスにある空きマスだけをリストアップして返す
+//五目並べでは、遠くに置くのはほぼ無意味であるため。
 std::vector<int> neighbor_candidates(const Board& board, int radius = 1) {
     const std::vector<int> stones = occupied_indexes(board);
     if (stones.empty()) {
@@ -367,6 +404,7 @@ std::vector<int> neighbor_candidates(const Board& board, int radius = 1) {
     return candidates;
 }
 
+// 渡された候補手のリストを強い手から順番に並び替える。
 void sort_moves_by_heuristic(const Board& board, int player, std::vector<int>& moves) {
     std::stable_sort(
         moves.begin(),
@@ -387,6 +425,7 @@ void sort_moves_by_heuristic(const Board& board, int player, std::vector<int>& m
     );
 }
 
+// 現在の盤面における、基本的な合法手のリストを作成して返す
 std::vector<int> generate_base_legal_moves(const Board& board, int player) {
     std::vector<int> candidates = neighbor_candidates(board);
     std::vector<int> legal_moves;
@@ -419,6 +458,7 @@ std::vector<int> generate_base_legal_moves(const Board& board, int player) {
     return legal_moves;
 }
 
+// 合法手のリストの中から、そこに置けば即ゲーム終了する手があるかチェックし、あればその手のみを返す
 std::vector<int> immediate_winning_moves(
     const Board& board,
     int player,
@@ -434,6 +474,7 @@ std::vector<int> immediate_winning_moves(
     return winning_moves;
 }
 
+// 即勝ち手を最優先し、即負け手をブロックし、候補手の上位candidate_limit個を残して探索対象とする
 std::vector<int> generate_policy_moves(const Board& board, int player, int candidate_limit) {
     std::vector<int> legal_moves = generate_base_legal_moves(board, player);
     if (legal_moves.empty()) {
@@ -469,6 +510,7 @@ std::vector<int> generate_policy_moves(const Board& board, int player, int candi
     return legal_moves;
 }
 
+// 上位top_k個のなかから、評価値が高い手ほど高確率で選ばれるように重み付きランダムで手を選択する
 template <typename URNG>
 int choose_weighted_top_move(const Board& board, int player, const std::vector<int>& legal_moves, URNG& rng) {
     if (legal_moves.empty()) {
@@ -491,6 +533,7 @@ int choose_weighted_top_move(const Board& board, int player, const std::vector<i
     return ordered[static_cast<std::size_t>(dist(rng))];
 }
 
+// MCTSNodeのメンバ変数群
 struct MCTSNode {
     Board board {};
     int player_to_move = BLACK;
@@ -504,6 +547,7 @@ struct MCTSNode {
     std::vector<int> untried_moves;
     std::vector<std::unique_ptr<MCTSNode>> children;
 
+    // コンストラクタ
     MCTSNode(
         const Board& board_value,
         int player_value,
@@ -539,14 +583,17 @@ struct MCTSNode {
         }
     }
 
+    // この局面が既に勝敗が決した終着点かどうかを返す
     bool is_terminal() const {
         return terminal_winner != NO_WINNER;
     }
 
+    // この局面から打てる候補手がすべて1回以上先読みされたかを判定する
     bool fully_expanded() const {
         return untried_moves.empty();
     }
 
+    // UCT(UCB1)値に基づく最適な子ノードの選択
     MCTSNode* best_child(double exploration) const {
         if (children.empty()) {
             throw std::runtime_error("best_child called on a node with no children.");
@@ -564,6 +611,7 @@ struct MCTSNode {
         return best_it->get();
     }
 
+    // この局面から、まだ探索したことがない手をランダムに1つ選び、それを新しい子ノードとしてツリーに追加して展開する
     template <typename URNG>
     MCTSNode* expand(URNG& rng) {
         if (untried_moves.empty()) {
@@ -589,6 +637,7 @@ struct MCTSNode {
         return children.back().get();
     }
 
+    // ロールアウトで勝敗が確定した結果を受け取り、このノードの訪問回数と勝利数を更新する
     void update(int winner) {
         ++visits;
         if (winner == DRAW) {
@@ -599,6 +648,7 @@ struct MCTSNode {
     }
 };
 
+// 探索ツリーの端に達した局面から、ゲームが決着するまで、脳内でモンテカルロ自己対戦を走らせて勝敗結果を予測する
 template <typename URNG>
 int rollout(Board board, int player, const Options& options, URNG& rng) {
     int current_player = player;
@@ -628,6 +678,7 @@ int rollout(Board board, int player, const Options& options, URNG& rng) {
     return DRAW;
 }
 
+// 探索の中心的な手順を実行する司令塔関数。simulationsの回数だけ、手の選択から逆伝播まですべて行う
 template <typename URNG>
 int run_mcts(const Board& board, int player, const Options& options, const std::vector<int>& root_moves, URNG& rng) {
     if (root_moves.empty()) {
@@ -682,6 +733,7 @@ int run_mcts(const Board& board, int player, const Options& options, const std::
     return (*best_it)->move_played;
 }
 
+// 対局中の現在の盤面状態とモデルが選択した指し手をpytorchの学習用データの1行として整形し、バッファ文字列に追加
 void append_training_row(std::string& buffer, const Board& board, int move) {
     for (int index = 0; index < BOARD_CELLS; ++index) {
         buffer += std::to_string(board[static_cast<std::size_t>(index)]);
@@ -693,6 +745,7 @@ void append_training_row(std::string& buffer, const Board& board, int move) {
     buffer.push_back('\n');
 }
 
+// 対局結果の商社を、コンソール表示用にわかりやすいテキストに変換する
 std::string winner_label(int winner, bool foul_loss) {
     if (winner == DRAW) {
         return "draw";
@@ -703,6 +756,7 @@ std::string winner_label(int winner, bool foul_loss) {
     return foul_loss ? "white(foul)" : "white";
 }
 
+// 現在の盤面において、次に打つ手を決定してそのインデックスを返す
 template <typename URNG>
 int select_move(const Board& board, int player, const Options& options, URNG& rng) {
     const std::vector<int> root_moves = generate_policy_moves(board, player, options.candidate_limit);
@@ -718,6 +772,7 @@ int select_move(const Board& board, int player, const Options& options, URNG& rn
     return run_mcts(board, player, options, root_moves, rng);
 }
 
+// 空の盤面からスタートし、決着がつくまで1局を丸ごと実行し、その結果を返す
 template <typename URNG>
 GameResult play_game(std::uint64_t game_index, int worker_id, const Options& options, URNG& rng, std::ostream& log_stream) {
     Board board {};
@@ -763,6 +818,7 @@ GameResult play_game(std::uint64_t game_index, int worker_id, const Options& opt
     }
 }
 
+// 文字列から数値へ変換する
 std::uint64_t parse_u64(const std::string& value, const char* name) {
     try {
         std::size_t processed = 0;
@@ -776,6 +832,7 @@ std::uint64_t parse_u64(const std::string& value, const char* name) {
     }
 }
 
+// 文字列から数値へ変換する
 int parse_int(const std::string& value, const char* name) {
     try {
         std::size_t processed = 0;
@@ -792,6 +849,7 @@ int parse_int(const std::string& value, const char* name) {
     }
 }
 
+// 文字列から数値へ変換する
 double parse_double(const std::string& value, const char* name) {
     try {
         std::size_t processed = 0;
@@ -805,14 +863,38 @@ double parse_double(const std::string& value, const char* name) {
     }
 }
 
+// python側から渡されるカンマ区切りの盤面状態を分解し、board配列にマッピングする
+Board parse_board_str(const std::string& str) {
+    Board board {};
+    board.fill(EMPTY);
+    std::stringstream ss(str);
+    std::string item;
+    int idx = 0;
+    while (std::getline(ss, item, ',')) {
+        if (idx >= BOARD_CELLS) {
+            throw std::runtime_error("Board string has too many cells.");
+        }
+        board[static_cast<std::size_t>(idx)] = std::stoi(item);
+        idx++;
+    }
+    if (idx != BOARD_CELLS) {
+        throw std::runtime_error("Board string has insufficient cells. Expected 225, got " + std::to_string(idx));
+    }
+    return board;
+}
+
+// プログラムの正しい使い方を表示し、プログラムをその場で終了させる関数
 [[noreturn]] void print_usage_and_exit(const char* argv0, int code) {
     std::ostream& stream = code == 0 ? std::cout : std::cerr;
     stream
         << "Usage: " << argv0 << " <games> [--simulations N] [--parallel N] [--seed N]\n"
-        << "       [--candidate-limit N] [--rollout-limit N] [--exploration C] [--trace-plies]\n";
+        << "       [--candidate-limit N] [--rollout-limit N] [--exploration C] [--trace-plies]\n"
+        << "       Or in EVAL mode:\n"
+        << "       " << argv0 << " --eval --board <csv_str> --move <N> [--simulations N] [--seed N] [--exploration C]\n";
     std::exit(code);
 }
 
+// 起動オプションを処理する。--○○みたいなやつを処理する。
 Options parse_args(int argc, char* argv[]) {
     if (argc <= 1) {
         print_usage_and_exit(argv[0], 1);
@@ -830,8 +912,13 @@ Options parse_args(int argc, char* argv[]) {
             options.trace_plies = true;
             continue;
         }
+        if (arg == "--eval") {
+            options.is_eval = true;
+            continue;
+        }
         if (arg == "--simulations" || arg == "--parallel" || arg == "--seed" ||
-            arg == "--candidate-limit" || arg == "--rollout-limit" || arg == "--exploration") {
+            arg == "--candidate-limit" || arg == "--rollout-limit" || arg == "--exploration" ||
+            arg == "--board" || arg == "--move") {
             if (index + 1 >= argc) {
                 throw std::runtime_error("Missing value for " + arg);
             }
@@ -849,6 +936,10 @@ Options parse_args(int argc, char* argv[]) {
                 options.rollout_limit = parse_int(value, "--rollout-limit");
             } else if (arg == "--exploration") {
                 options.exploration = parse_double(value, "--exploration");
+            } else if (arg == "--board") {
+                options.eval_board_str = value;
+            } else if (arg == "--move") {
+                options.eval_move = parse_int(value, "--move");
             }
             continue;
         }
@@ -862,12 +953,22 @@ Options parse_args(int argc, char* argv[]) {
         games_set = true;
     }
 
-    if (!games_set) {
-        throw std::runtime_error("Missing required positional argument: games");
+    if (!options.is_eval) {
+        if (!games_set) {
+            throw std::runtime_error("Missing required positional argument: games");
+        }
+        if (options.games == 0) {
+            throw std::runtime_error("games must be positive.");
+        }
+    } else {
+        if (options.eval_board_str.empty()) {
+            throw std::runtime_error("EVAL mode requires --board <csv_str>");
+        }
+        if (options.eval_move < 0 || options.eval_move >= BOARD_CELLS) {
+            throw std::runtime_error("EVAL mode requires a valid --move [0-224]");
+        }
     }
-    if (options.games == 0) {
-        throw std::runtime_error("games must be positive.");
-    }
+
     if (options.simulations <= 0) {
         throw std::runtime_error("--simulations must be positive.");
     }
@@ -887,6 +988,7 @@ Options parse_args(int argc, char* argv[]) {
     return options;
 }
 
+// シード値生成
 std::uint64_t make_seed(const Options& options, int worker_id) {
     if (options.has_seed) {
         return options.seed + static_cast<std::uint64_t>(worker_id) * 1'000'003ULL;
@@ -899,9 +1001,81 @@ std::uint64_t make_seed(const Options& options, int worker_id) {
 
 }  // namespace
 
+// main関数
 int main(int argc, char* argv[]) {
     try {
         const Options options = parse_args(argc, argv);
+
+        if (options.is_eval) {
+            Board board = parse_board_str(options.eval_board_str);
+            int move = options.eval_move;
+
+            if (board[static_cast<std::size_t>(move)] != EMPTY) {
+                std::cout << "win_rate=0.0\n";
+                return 0;
+            }
+
+            const auto [black_count, white_count] = stone_counts(board);
+            const int player = (black_count == white_count) ? BLACK : WHITE;
+
+            if (player == BLACK && is_forbidden_for_black(board, move)) {
+                std::cout << "win_rate=0.0\n";
+                return 0;
+            }
+
+            Board next_board = board_with_move(board, move, player);
+            const int immediate_winner = winner_after_move(next_board, move, player);
+
+            if (immediate_winner != NO_WINNER) {
+                double rate = (immediate_winner == player) ? 1.0 : 0.0;
+                std::cout << "win_rate=" << rate << "\n";
+                return 0;
+            }
+
+            std::mt19937_64 rng(make_seed(options, 0));
+            const int next_player = other_player(player);
+            const std::vector<int> root_moves = generate_policy_moves(next_board, next_player, options.candidate_limit);
+
+            if (root_moves.empty()) {
+                double rate = board_is_full(next_board) ? 0.5 : 0.0;
+                std::cout << "win_rate=" << rate << "\n";
+                return 0;
+            }
+
+            MCTSNode root(next_board, next_player, player, options.candidate_limit);
+            root.untried_moves = root_moves;
+
+            for (int simulation = 0; simulation < options.simulations; ++simulation) {
+                MCTSNode* node = &root;
+
+                while (!node->is_terminal() && node->fully_expanded() && !node->children.empty()) {
+                    node = node->best_child(options.exploration);
+                }
+
+                if (!node->is_terminal() && !node->untried_moves.empty()) {
+                    node = node->expand(rng);
+                }
+
+                int winner = DRAW;
+                if (node->is_terminal()) {
+                    winner = node->terminal_winner;
+                } else {
+                    winner = rollout(node->board, node->player_to_move, options, rng);
+                }
+
+                while (node != nullptr) {
+                    node->update(winner);
+                    node = node->parent;
+                }
+            }
+
+            double win_rate = 0.5;
+            if (root.visits > 0) {
+                win_rate = root.wins / static_cast<double>(root.visits);
+            }
+            std::cout << "win_rate=" << win_rate << "\n";
+            return 0;
+        }
 
         std::mutex stdout_mutex;
         std::mutex stderr_mutex;
