@@ -128,13 +128,17 @@ class GRPOTrainer:
             #     dist = Categorical(probs=probs)
             #     move_idx = dist.sample().item()
 
-            move_idx = self.agent.select_move_via_mcts(board, simulations=1000)
+            # 序盤（最初の10手まで）は T=1.0、それ以降は T=0.1 で探索
+            temp = 1.0 if len(boards) <= 10 else 0.1
+            move_idx = self.agent.select_move_via_mcts(board, simulations=1000, temperature=temp, use_noise=True)
 
             board[move_idx] = current_player
-            boards.append(board.copy())
 
+            # 勝敗が決着した盤面はプールに追加しない (次の手番のプレイヤーが打てないため)
             winner = winner_after_move(board, move_idx, current_player)
-            if winner is not None:
+            if winner is None:
+                boards.append(board.copy())
+            else:
                 break
 
         return boards
@@ -183,15 +187,19 @@ class GRPOTrainer:
                 if checkpoint_path.exists():
                     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
                     if "trajectory_boards" in checkpoint:
-                        trajectory_boards = checkpoint["trajectory_boards"]
+                        # 合法手が存在する有効な盤面のみを復元する (クラッシュ防止)
+                        trajectory_boards = [
+                            b for b in checkpoint["trajectory_boards"]
+                            if self.agent.tokenizer.legal_move_mask(b).any()
+                        ]
                         print(f"Restored {len(trajectory_boards)} trajectory boards from checkpoint.")
             except Exception as e:
                 print(f"Warning: Failed to restore trajectory_boards from checkpoint: {e}")
 
-        # プールが空の場合（新規開始、またはチェックポイントに無かった場合）のみ、data.csv.gz からコールドスタート局面をロード
+        # プールが空の場合（新規開始、またはチェックポイントに無かった場合）のみ、data.csv.gz からコールドスタート局面をロード (1000局)
         if not trajectory_boards:
             csv_gz_path = Path("data.csv.gz").absolute()
-            trajectory_boards = load_initial_trajectory_boards(csv_gz_path, num_samples=300)
+            trajectory_boards = load_initial_trajectory_boards(csv_gz_path, num_samples=1000)
 
         sample_prob = self.cfg.grpo.get("trajectory_sample_prob", 0.8)
         
@@ -209,8 +217,8 @@ class GRPOTrainer:
                     new_boards = self.collect_trajectory_boards()
                     trajectory_boards.extend(new_boards)
  
-                    if len(trajectory_boards) > 300:
-                        trajectory_boards = trajectory_boards[-300:]
+                    if len(trajectory_boards) > 1000:
+                        trajectory_boards = trajectory_boards[-1000:]
                 else:
                     # 盤面をランダムに選ぶ
                     start_board = random.choice(trajectory_boards)

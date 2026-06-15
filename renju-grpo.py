@@ -42,7 +42,13 @@ def main(cfg: DictConfig) -> None:
     
     # 4. 事前学習モデル (Policy & Reference) のロード
     print(f"Loading checkpoint from: {cfg.grpo.checkpoint_path}")
-    policy_model, ref_model = load_policy_and_reference(cfg.grpo.checkpoint_path, device)
+    ref_checkpoint_path = cfg.grpo.get("ref_checkpoint_path", "artifacts/checkpoints/pretrained.pt")
+    print(f"Loading reference model from: {ref_checkpoint_path}")
+    policy_model, ref_model = load_policy_and_reference(
+        cfg.grpo.checkpoint_path, 
+        ref_checkpoint_path, 
+        device
+    )
     
     # 4.5. チェックポイントから開始イテレーションを推測
     start_iteration = 1

@@ -10,25 +10,26 @@ from renju_transformer.tokenizer import RenjuTokenizer  # 追加
 from grpo.agent import GRPOAgent
 from renju_transformer.utils import select_device
 
-def load_policy_and_reference(checkpoint_path: str | Path, device: torch.device):
+def load_policy_and_reference(policy_checkpoint_path: str | Path, ref_checkpoint_path: str | Path, device: torch.device):
     """
-    事前学習済みのチェックポイントから、更新用の Policy モデルと
-    固定用（KL制御用）の Reference モデルをロードして作成します。
+    更新用の Policy モデルを policy_checkpoint_path からロードし、
+    固定用（KL制御用）の Reference モデルを ref_checkpoint_path からロードして作成します。
     """
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
+    policy_checkpoint_path = Path(policy_checkpoint_path)
+    ref_checkpoint_path = Path(ref_checkpoint_path)
+    
+    if not policy_checkpoint_path.exists():
+        raise FileNotFoundError(f"Policy checkpoint not found at: {policy_checkpoint_path}")
+    if not ref_checkpoint_path.exists():
+        raise FileNotFoundError(f"Reference checkpoint not found at: {ref_checkpoint_path}")
 
-    # 1. チェックポイントのロード
-    # weights_only=False は、configなどの辞書オブジェクトが含まれているため必要です
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    # 1. Policy チェックポイントのロード
+    policy_checkpoint = torch.load(policy_checkpoint_path, map_location=device, weights_only=False)
+    policy_config = policy_checkpoint.get("config")
+    if policy_config is None:
+        raise ValueError("Policy checkpoint does not contain 'config' field.")
     
-    # チェックポイントに保存されている訓練時のconfigを取得
-    checkpoint_config = checkpoint.get("config")
-    if checkpoint_config is None:
-        raise ValueError("Checkpoint does not contain 'config' field.")
-    
-    model_cfg = checkpoint_config["model"]
+    model_cfg = policy_config["model"]
 
     # 2. Policy モデルの作成と重みのロード
     policy_model = RenjuTransformerModel(
@@ -43,16 +44,32 @@ def load_policy_and_reference(checkpoint_path: str | Path, device: torch.device)
         norm_first=model_cfg["norm_first"],
         num_move_labels=model_cfg["num_move_labels"],
     )
-    policy_model.load_state_dict(checkpoint["model_state_dict"])
+    policy_model.load_state_dict(policy_checkpoint["model_state_dict"])
     policy_model.to(device)
 
-    # 3. Reference モデルの作成 (Policy モデルを複製)
-    # copy.deepcopy を使うことで、同じ重みを持った独立したモデルインスタンスを作成できます
-    ref_model = copy.deepcopy(policy_model)
+    # 3. Reference チェックポイントのロードとモデルの作成
+    ref_checkpoint = torch.load(ref_checkpoint_path, map_location=device, weights_only=False)
+    ref_config = ref_checkpoint.get("config")
+    if ref_config is None:
+        raise ValueError("Reference checkpoint does not contain 'config' field.")
+        
+    ref_model_cfg = ref_config["model"]
+    ref_model = RenjuTransformerModel(
+        vocab_size=ref_model_cfg["token_vocab_size"],
+        max_seq_len=ref_model_cfg["max_seq_len"],
+        d_model=ref_model_cfg["d_model"],
+        nhead=ref_model_cfg["nhead"],
+        num_layers=ref_model_cfg["num_layers"],
+        dim_feedforward=ref_model_cfg["dim_feedforward"],
+        dropout=ref_model_cfg["dropout"],
+        activation=ref_model_cfg["activation"],
+        norm_first=ref_model_cfg["norm_first"],
+        num_move_labels=ref_model_cfg["num_move_labels"],
+    )
+    ref_model.load_state_dict(ref_checkpoint["model_state_dict"])
     ref_model.to(device)
 
     # 4. Reference モデルのパラメータを固定 (勾配計算を無効化)
-    # これにより、誤差逆伝播の計算対象から外れ、メモリ消費と計算量を節約できます
     for param in ref_model.parameters():
         param.requires_grad = False
 

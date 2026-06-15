@@ -1327,5 +1327,91 @@ extern "C" {
             return 0.5;
         }
     }
+
+    // 新API: 現在の局面から単一のMCTS探索を実行し、各手の訪問回数を visits_out に書き戻す
+    DLL_EXPORT double run_mcts_c_api_with_policy_and_visits(
+        const int* board_array, 
+        int simulations, 
+        std::uint64_t seed,
+        const double* prior_probs,
+        int* visits_out
+    ) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+
+            // 訪問回数配列の初期化
+            if (visits_out != nullptr) {
+                std::fill(visits_out, visits_out + BOARD_CELLS, 0);
+            }
+
+            const auto [black_count, white_count] = stone_counts(board);
+            const int player = (black_count == white_count) ? BLACK : WHITE;
+
+            Options options;
+            options.simulations = simulations;
+            options.has_seed = true;
+            options.seed = seed;
+
+            std::mt19937_64 rng(seed);
+            const std::vector<int> root_moves = generate_policy_moves(board, player, options.candidate_limit);
+
+            if (root_moves.empty()) {
+                return 0.5;
+            }
+
+            // 現在の局面(board)をルートとする
+            MCTSNode root(board, player, other_player(player), options.candidate_limit);
+            root.untried_moves = root_moves;
+
+            for (int simulation = 0; simulation < options.simulations; ++simulation) {
+                MCTSNode* node = &root;
+
+                while (!node->is_terminal() && node->fully_expanded() && !node->children.empty()) {
+                    node = node->best_child(options.exploration);
+                }
+
+                if (!node->is_terminal() && !node->untried_moves.empty()) {
+                    MCTSNode* parent_node = node;
+                    node = node->expand(rng);
+                    // ルートの直下に展開したノードには、渡された事前確率を割り当てる
+                    if (parent_node == &root && prior_probs != nullptr) {
+                        node->prior_prob = prior_probs[node->move_played];
+                    }
+                }
+
+                int winner = DRAW;
+                if (node->is_terminal()) {
+                    winner = node->terminal_winner;
+                } else {
+                    winner = rollout(node->board, node->player_to_move, options, rng);
+                }
+
+                while (node != nullptr) {
+                    node->update(winner);
+                    node = node->parent;
+                }
+            }
+
+            // ルートの子ノードの訪問回数を visits_out に書き戻す
+            if (visits_out != nullptr) {
+                for (const auto& child : root.children) {
+                    if (child->move_played >= 0 && child->move_played < BOARD_CELLS) {
+                        visits_out[child->move_played] = child->visits;
+                    }
+                }
+            }
+
+            double win_rate = 0.5;
+            if (root.visits > 0) {
+                win_rate = root.wins / static_cast<double>(root.visits);
+            }
+            return win_rate;
+        } catch (...) {
+            return 0.5;
+        }
+    }
 }
 

@@ -37,6 +37,16 @@ def _get_mcts_lib():
         ]
         _mcts_lib.run_mcts_c_api_with_policy.restype = ctypes.c_double
 
+        # 新API（訪問回数配列の書き戻し付き単一MCTS）のロード
+        _mcts_lib.run_mcts_c_api_with_policy_and_visits.argtypes = [
+            ctypes.POINTER(ctypes.c_int),    # board_array
+            ctypes.c_int,                    # simulations
+            ctypes.c_uint64,                 # seed
+            ctypes.POINTER(ctypes.c_double), # prior_probs
+            ctypes.POINTER(ctypes.c_int)     # visits_out
+        ]
+        _mcts_lib.run_mcts_c_api_with_policy_and_visits.restype = ctypes.c_double
+
     return _mcts_lib
 
 def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42) -> float:
@@ -59,6 +69,20 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
     except Exception as e:
         print(f"Error running MCTS eval with policy (DLL): {e}", file=sys.stderr)
         return 0.5
+
+def run_mcts_eval_with_policy_and_visits(board: list[int], simulations: int, seed: int, prior_probs: list[float]) -> tuple[float, list[int]]:
+    try:
+        lib = _get_mcts_lib()
+        board_array = (ctypes.c_int * 225)(*board)
+        probs_array = (ctypes.c_double * 225)(*prior_probs)
+        visits_array = (ctypes.c_int * 225)()
+        
+        win_rate = lib.run_mcts_c_api_with_policy_and_visits(board_array, simulations, seed, probs_array, visits_array)
+        
+        return win_rate, list(visits_array)
+    except Exception as e:
+        print(f"Error running MCTS eval with policy and visits (DLL): {e}", file=sys.stderr)
+        return 0.5, [0] * 225
 
 class GRPOAgent:
     def __init__(self, policy_model, ref_model, tokenizer, device, mcts_simulations=200):
@@ -172,10 +196,14 @@ class GRPOAgent:
             
         return rewards, last_board
 
-    def select_move_via_mcts(self, board_state, simulations=1000) -> int:
-        """モデルにガイドされたMCTSを実行し、最も評価の高い手（勝率最大の候補手）を選びます。
-        速度向上のため、モデルの事前確率の上位10手（Top-10）のみを探索候補に絞り込みます。
+    def select_move_via_mcts(self, board_state, simulations=1000, temperature=1.0, use_noise=True) -> int:
+        """モデルにガイドされた単一のMCTS探索を実行し、
+        各候補手の訪問回数に基づいて確率的（あるいは決定論的）に指し手を選択します。
+        ディリクレノイズおよび温度パラメータを適用して探索の多様性を確保します。
         """
+        import numpy as np
+        import random
+
         legal_mask = self.tokenizer.legal_move_mask(board_state).to(self.device)
         legal_moves = [i for i, is_legal in enumerate(legal_mask.tolist()) if is_legal]
         
@@ -185,65 +213,74 @@ class GRPOAgent:
         if len(legal_moves) == 1:
             return legal_moves[0]
             
-        # 1. まず現在の局面でモデルを1回推論し、上位10手を決める (Top-k Pruning)
+        # 1. 現在の局面でモデル推論し、事前確率 prior_probs を取得
         input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
         with torch.no_grad():
             logits = self.policy(input_ids).squeeze(0)
             masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
-            prior_probs_on_current = torch.softmax(masked_logits, dim=-1)
+            prior_probs_on_current = torch.softmax(masked_logits, dim=-1).cpu().numpy()
             
-        # 合法手の中からモデル事前確率の高い上位10手を選択する
-        top_k = min(10, len(legal_moves))
-        top_values, top_indices = torch.topk(prior_probs_on_current, k=top_k)
-        candidate_moves = top_indices.cpu().numpy().tolist()
-        
-        # 2. 厳選された上位10個の候補手を打った後の局面を生成してモデルに入力し、バッチ推論する
-        player = infer_player(board_state)
-        batch_input_ids = []
-        batch_legal_masks = []
-        
-        for move_idx in candidate_moves:
-            next_board = board_with_move(board_state, move_idx, player)
-            input_ids = self.tokenizer.encode_input(next_board)
-            batch_input_ids.append(input_ids)
-            legal_mask = self.tokenizer.legal_move_mask(next_board)
-            batch_legal_masks.append(legal_mask)
+        # 2. ディリクレノイズの追加 (自己対戦用)
+        if use_noise and len(legal_moves) > 0:
+            # 連珠用のノイズパラメータ: alpha = 0.03, epsilon = 0.25
+            noise = np.random.dirichlet([0.03] * len(legal_moves))
+            legal_probs = prior_probs_on_current[legal_moves]
             
-        if batch_input_ids:
-            input_ids_tensor = torch.stack(batch_input_ids).to(self.device)
-            legal_masks_tensor = torch.stack(batch_legal_masks).to(self.device)
-            with torch.no_grad():
-                logits = self.policy(input_ids_tensor)
-                masked_logits = logits.masked_fill(~legal_masks_tensor, float("-inf"))
-                probs_tensor = torch.softmax(masked_logits, dim=-1)
-                batch_probs = probs_tensor.cpu().numpy().tolist()
+            # 念のため正規化
+            sum_legal = np.sum(legal_probs)
+            if sum_legal > 0:
+                legal_probs = legal_probs / sum_legal
+            else:
+                legal_probs = np.ones_like(legal_moves) / len(legal_moves)
+                
+            blended_probs = (1.0 - 0.25) * legal_probs + 0.25 * noise
+            
+            # prior_probs に書き戻す
+            prior_probs_blended = np.zeros(225, dtype=np.float32)
+            prior_probs_blended[legal_moves] = blended_probs
+            prior_probs_list = prior_probs_blended.tolist()
         else:
-            batch_probs = []
+            prior_probs_list = prior_probs_on_current.tolist()
             
-        rewards = [0.0] * len(candidate_moves)
+        # 3. 単一 MCTS 探索の実行 (訪問回数 visits_out の取得)
+        seed = random.randint(0, 2**32 - 1)
+        win_rate, visits = run_mcts_eval_with_policy_and_visits(
+            board_state, simulations, seed, prior_probs_list
+        )
         
-        # 絞り込んだ候補手についてのみ並列でMCTSを実行
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidate_moves), 16)) as executor:
-            futures = {
-                executor.submit(
-                    run_mcts_eval_with_policy, 
-                    board_state, 
-                    move_idx, 
-                    batch_probs[i],
-                    simulations,
-                    seed=42 + i * 997
-                ): i
-                for i, move_idx in enumerate(candidate_moves)
-            }
+        visits_np = np.array(visits, dtype=np.float32)
+        
+        # 4. 温度パラメータに基づくサンプリング
+        if temperature == 0.0:
+            # 決定論的 (訪問回数最大の手を選択)
+            best_moves = np.argwhere(visits_np == np.max(visits_np)).flatten()
+            best_legal_moves = [m for m in best_moves if m in legal_moves]
+            if not best_legal_moves:
+                # 展開されていなかった場合などのフォールバック
+                best_legal_moves = [m for m in np.argwhere(prior_probs_on_current == np.max(prior_probs_on_current)).flatten() if m in legal_moves]
+            return int(random.choice(best_legal_moves))
+        else:
+            # 確率的サンプリング
+            if np.sum(visits_np) == 0:
+                # 訪問数がすべて 0 の場合は、モデルの事前確率分布でフォールバック
+                probs = np.zeros(225, dtype=np.float32)
+                probs[legal_moves] = prior_probs_on_current[legal_moves]
+                sum_p = np.sum(probs)
+                if sum_p > 0:
+                    probs = probs / sum_p
+                else:
+                    probs[legal_moves] = 1.0 / len(legal_moves)
+            else:
+                # 各手の訪問数 N(a) に対し N(a)^(1/T) を計算して確率分布を構築
+                power_visits = np.zeros(225, dtype=np.float32)
+                for m in legal_moves:
+                    power_visits[m] = np.power(visits_np[m], 1.0 / temperature)
+                sum_pv = np.sum(power_visits)
+                if sum_pv > 0:
+                    probs = power_visits / sum_pv
+                else:
+                    probs = np.zeros(225, dtype=np.float32)
+                    probs[legal_moves] = 1.0 / len(legal_moves)
             
-            for future in concurrent.futures.as_completed(futures):
-                idx = futures[future]
-                try:
-                    win_rate = future.result()
-                    rewards[idx] = win_rate
-                except Exception as e:
-                    rewards[idx] = 0.5  # Draw on failure
-                    
-        # 最も評価（勝率）の高い手を選択
-        best_idx = int(torch.tensor(rewards).argmax().item())
-        return candidate_moves[best_idx]
+            # 指し手をサンプリング
+            return int(np.random.choice(225, p=probs))
