@@ -83,7 +83,6 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
         opp_immediate_wins = [
             m for m in range(225)
             if next_board[m] == 0
-            and not (opponent == 1 and is_forbidden_for_black(next_board, m))
             and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
         ]
         if opp_immediate_wins:
@@ -93,7 +92,6 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
         player_immediate_wins = [
             m for m in range(225)
             if next_board[m] == 0
-            and not (player == 1 and is_forbidden_for_black(next_board, m))
             and winner_after_move(board_with_move(next_board, m, player), m, player) == player
         ]
         if len(player_immediate_wins) >= 2:
@@ -147,7 +145,6 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
         opp_immediate_wins = [
             m for m in range(225)
             if next_board[m] == 0
-            and not (opponent == 1 and is_forbidden_for_black(next_board, m))
             and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
         ]
         if opp_immediate_wins:
@@ -157,7 +154,6 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
         player_immediate_wins = [
             m for m in range(225)
             if next_board[m] == 0
-            and not (player == 1 and is_forbidden_for_black(next_board, m))
             and winner_after_move(board_with_move(next_board, m, player), m, player) == player
         ]
         if len(player_immediate_wins) >= 2:
