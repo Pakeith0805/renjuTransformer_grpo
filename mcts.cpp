@@ -1150,6 +1150,121 @@ int main(int argc, char* argv[]) {
     }
 }
 
+// ==========================================
+// VCF (Victory by Continuous Fours) Solver
+// ==========================================
+
+bool is_winning_move(const Board& board, int move, int player) {
+    if (board[static_cast<std::size_t>(move)] != EMPTY) {
+        return false;
+    }
+    if (player == BLACK && is_forbidden_for_black(board, move)) {
+        return false;
+    }
+    Board next_board = board_with_move(board, move, player);
+    return winner_after_move(next_board, move, player) == player;
+}
+
+bool creates_four_threat(const Board& board, int move, int player) {
+    if (board[static_cast<std::size_t>(move)] != EMPTY) {
+        return false;
+    }
+    if (player == BLACK && is_forbidden_for_black(board, move)) {
+        return false;
+    }
+
+    Board next_board = board_with_move(board, move, player);
+    for (int next_move = 0; next_move < BOARD_CELLS; ++next_move) {
+        if (is_winning_move(next_board, next_move, player)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int solve_vcf_recursive(Board& board, int player, int depth) {
+    // 1. 即座に勝てる（五連を作れる）手があるかチェック
+    std::vector<int> candidates = neighbor_candidates(board, 2);
+    for (int move : candidates) {
+        if (is_winning_move(board, move, player)) {
+            return move;
+        }
+    }
+
+    if (depth <= 0) {
+        return -1;
+    }
+
+    const int opponent = other_player(player);
+
+    // 2. 「四」を作る脅威手（スレット）を探索
+    std::vector<int> threat_moves;
+    for (int move : candidates) {
+        if (creates_four_threat(board, move, player)) {
+            threat_moves.push_back(move);
+        }
+    }
+
+    // 各脅威手を深く探索
+    for (int move : threat_moves) {
+        // 攻撃側の石を置く
+        board[static_cast<std::size_t>(move)] = player;
+
+        // 次のターンで攻撃側が即勝利（五連）できる空きマスをカウント
+        std::vector<int> win_squares;
+        for (int win_move = 0; win_move < BOARD_CELLS; ++win_move) {
+            if (is_winning_move(board, win_move, player)) {
+                win_squares.push_back(win_move);
+            }
+        }
+
+        // 勝ちマスが2箇所以上あれば、防御側は防ぎきれないので勝利確定
+        if (win_squares.size() >= 2) {
+            board[static_cast<std::size_t>(move)] = EMPTY; // undo
+            return move;
+        }
+
+        // 勝ちマスがちょうど1つの場合、防御側はそこを強制的にブロックしなければならない
+        if (win_squares.size() == 1) {
+            int block_move = win_squares[0];
+
+            // 防御側にとってブロックする手が合法であるか確認
+            if (opponent == BLACK && is_forbidden_for_black(board, block_move)) {
+                // 禁手のため防御側は打てない ＝ 攻撃側の勝利確定
+                board[static_cast<std::size_t>(move)] = EMPTY; // undo
+                return move;
+            }
+
+            // 防御側の石を置いてブロックをシミュレート
+            board[static_cast<std::size_t>(block_move)] = opponent;
+
+            // ブロック手が相手の勝利にならないかチェック (相手の即勝ちを避けるため)
+            if (winner_after_move(board, block_move, opponent) == opponent) {
+                // 自滅手なのでこの分岐は無効
+                board[static_cast<std::size_t>(block_move)] = EMPTY; // undo block
+                board[static_cast<std::size_t>(move)] = EMPTY;       // undo move
+                continue;
+            }
+
+            // 再帰呼び出し
+            int next_win = solve_vcf_recursive(board, player, depth - 1);
+
+            // 元に戻す
+            board[static_cast<std::size_t>(block_move)] = EMPTY; // undo block
+            board[static_cast<std::size_t>(move)] = EMPTY;       // undo move
+
+            if (next_win != -1) {
+                return move; // 勝ち手順を発見
+            }
+        } else {
+            // 勝ちマスがない（実際にはcreates_four_threatでチェック済みなのでここには来ないはず）
+            board[static_cast<std::size_t>(move)] = EMPTY;
+        }
+    }
+
+    return -1;
+}
+
 #ifdef _WIN32
 #define DLL_EXPORT __declspec(dllexport)
 #else
@@ -1411,6 +1526,19 @@ extern "C" {
             return win_rate;
         } catch (...) {
             return 0.5;
+        }
+    }
+
+    // VCF (Victory by Continuous Fours) 探索用の C-API
+    DLL_EXPORT int solve_vcf_c_api(const int* board_array, int player, int max_depth) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            return solve_vcf_recursive(board, player, max_depth);
+        } catch (...) {
+            return -1;
         }
     }
 }
