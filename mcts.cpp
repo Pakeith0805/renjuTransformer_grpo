@@ -1182,7 +1182,11 @@ bool creates_four_threat(const Board& board, int move, int player) {
     return false;
 }
 
-int solve_vcf_recursive(Board& board, int player, int depth) {
+int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
+    if (++node_count > 200000) {
+        return -1; // 20万ノードで強制打ち切り
+    }
+
     // 1. 即座に勝てる（五連を作れる）手があるかチェック
     std::vector<int> candidates = neighbor_candidates(board, 2);
     for (int move : candidates) {
@@ -1247,7 +1251,7 @@ int solve_vcf_recursive(Board& board, int player, int depth) {
             }
 
             // 再帰呼び出し
-            int next_win = solve_vcf_recursive(board, player, depth - 1);
+            int next_win = solve_vcf_recursive(board, player, depth - 1, node_count);
 
             // 元に戻す
             board[static_cast<std::size_t>(block_move)] = EMPTY; // undo block
@@ -1536,7 +1540,8 @@ extern "C" {
             for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
                 board[i] = board_array[i];
             }
-            return solve_vcf_recursive(board, player, max_depth);
+            int node_count = 0;
+            return solve_vcf_recursive(board, player, max_depth, node_count);
         } catch (...) {
             return -1;
         }

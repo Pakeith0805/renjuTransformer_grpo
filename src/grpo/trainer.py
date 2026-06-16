@@ -6,7 +6,7 @@ from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf
 import mlflow
-from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black
+from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black, board_winner, legal_move_mask
 from torch.distributions import Categorical
 from grpo.load_model import print_board
 
@@ -26,6 +26,21 @@ def load_initial_trajectory_boards(csv_gz_path: Path, num_samples: int = 300) ->
                 try:
                     # 最初の225列（盤面）を数値のリストとして抽出
                     board = [int(cell) for cell in row[:225]]
+                    
+                    # 既に勝敗が決している盤面は除外
+                    if board_winner(board) is not None:
+                        continue
+                    
+                    # 手番を正しく推測できる（石の数が整合している）か確認
+                    try:
+                        infer_player(board)
+                    except ValueError:
+                        continue
+                        
+                    # 合法手が1つもない（満局）場合は除外
+                    if not any(legal_move_mask(board)):
+                        continue
+                        
                     all_lines.append(board)
                 except ValueError:
                     continue
