@@ -1,0 +1,14 @@
+{
+  "model_type": "RenjuTransformerModel",
+  "input_name": "input_ids",
+  "output_name": "logits",
+  "input_dtype": "int64",
+  "output_dtype": "float32",
+  "board_size": 15,
+  "board_cells": 225,
+  "input_length": 226,
+  "sep_token_id": 228,
+  "move_id_offset": 3,
+  "num_move_labels": 225,
+  "supports_batch": false
+}
