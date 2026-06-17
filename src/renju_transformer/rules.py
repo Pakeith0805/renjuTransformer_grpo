@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sys
+import ctypes
+from pathlib import Path
+
 BOARD_SIZE = 15
 BOARD_CELLS = BOARD_SIZE * BOARD_SIZE
 EMPTY = 0
@@ -9,6 +13,35 @@ BLACK = 1
 WHITE = 2
 DIRECTIONS = ((1, 0), (0, 1), (1, 1), (1, -1))
 CENTER_INDEX = (BOARD_SIZE // 2) * BOARD_SIZE + (BOARD_SIZE // 2)
+
+_mcts_lib = None
+
+def _get_mcts_lib():
+    global _mcts_lib
+    if _mcts_lib is None:
+        try:
+            lib_name = "mcts.so" if sys.platform != "win32" else "mcts.dll"
+            dll_path = Path(lib_name).absolute()
+            if not dll_path.exists():
+                dll_path = Path(__file__).resolve().parent.parent.parent / lib_name
+            
+            if dll_path.exists():
+                _mcts_lib = ctypes.CDLL(str(dll_path))
+                _mcts_lib.is_forbidden_for_black_c_api.argtypes = [
+                    ctypes.POINTER(ctypes.c_int),
+                    ctypes.c_int
+                ]
+                _mcts_lib.is_forbidden_for_black_c_api.restype = ctypes.c_int
+                
+                _mcts_lib.get_legal_moves_c_api.argtypes = [
+                    ctypes.POINTER(ctypes.c_int),
+                    ctypes.c_int,
+                    ctypes.POINTER(ctypes.c_int)
+                ]
+                _mcts_lib.get_legal_moves_c_api.restype = None
+        except Exception:
+            pass
+    return _mcts_lib
 
 # 0～224を盤面の座標に変換
 def idx_to_rc(index: int) -> tuple[int, int]:
@@ -146,6 +179,16 @@ def infer_player(board: list[int]) -> int:
 
 # 黒にとって、そのマスが禁じ手かどうか判定
 def is_forbidden_for_black(board: list[int], index: int) -> bool:
+    try:
+        lib = _get_mcts_lib()
+        if lib is not None:
+            board_array = (ctypes.c_int * 225)(*board)
+            return lib.is_forbidden_for_black_c_api(board_array, index) == 1
+    except Exception:
+        pass
+    return _is_forbidden_for_black_python(board, index)
+
+def _is_forbidden_for_black_python(board: list[int], index: int) -> bool:
     if board[index] != EMPTY:
         return True
 
@@ -166,6 +209,19 @@ def is_forbidden_for_black(board: list[int], index: int) -> bool:
 
 # 盤面全体の合法手のリストを作る
 def legal_move_mask(board: list[int]) -> list[bool]:
+    try:
+        lib = _get_mcts_lib()
+        if lib is not None:
+            player = infer_player(board)
+            board_array = (ctypes.c_int * 225)(*board)
+            mask_array = (ctypes.c_int * 225)()
+            lib.get_legal_moves_c_api(board_array, player, mask_array)
+            return [val == 1 for val in mask_array]
+    except Exception:
+        pass
+    return _legal_move_mask_python(board)
+
+def _legal_move_mask_python(board: list[int]) -> list[bool]:
     player = infer_player(board)
     mask: list[bool] = []
     for index, cell in enumerate(board):

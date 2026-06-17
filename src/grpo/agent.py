@@ -60,6 +60,13 @@ def _get_mcts_lib():
         ]
         _mcts_lib.solve_vcf_c_api.restype = ctypes.c_int
 
+        # 黒番の禁手判定C-APIの型定義を追加
+        _mcts_lib.is_forbidden_for_black_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int),    # board_array
+            ctypes.c_int                     # move_idx
+        ]
+        _mcts_lib.is_forbidden_for_black_c_api.restype = ctypes.c_int
+
     return _mcts_lib
 
 def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12) -> float:

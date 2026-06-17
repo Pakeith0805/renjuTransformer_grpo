@@ -1158,7 +1158,8 @@ bool is_winning_move(const Board& board, int move, int player) {
     if (board[static_cast<std::size_t>(move)] != EMPTY) {
         return false;
     }
-    if (player == BLACK && is_forbidden_for_black(board, move)) {
+    // 五連を作る手は三三や四四の禁手の対象外のため、長連（六連以上）のみを禁手チェックする
+    if (player == BLACK && is_overline(board_with_move(board, move, BLACK), move, BLACK)) {
         return false;
     }
     Board next_board = board_with_move(board, move, player);
@@ -1174,9 +1175,12 @@ bool creates_four_threat(const Board& board, int move, int player) {
     }
 
     Board next_board = board_with_move(board, move, player);
-    for (int next_move = 0; next_move < BOARD_CELLS; ++next_move) {
-        if (is_winning_move(next_board, next_move, player)) {
-            return true;
+    for (const auto& [dr, dc] : DIRECTIONS) {
+        const std::vector<int> line_points = line_points_through(move, dr, dc);
+        for (int next_move : line_points) {
+            if (is_winning_move(next_board, next_move, player)) {
+                return true;
+            }
         }
     }
     return false;
@@ -1286,6 +1290,9 @@ extern "C" {
                 board[i] = board_array[i];
             }
             int move = move_idx;
+            if (move < 0 || move >= BOARD_CELLS) {
+                return 0.0;
+            }
 
             if (board[static_cast<std::size_t>(move)] != EMPTY) {
                 return 0.0;
@@ -1371,6 +1378,9 @@ extern "C" {
                 board[i] = board_array[i];
             }
             int move = move_idx;
+            if (move < 0 || move >= BOARD_CELLS) {
+                return 0.0;
+            }
 
             if (board[static_cast<std::size_t>(move)] != EMPTY) {
                 return 0.0;
@@ -1544,6 +1554,45 @@ extern "C" {
             return solve_vcf_recursive(board, player, max_depth, node_count);
         } catch (...) {
             return -1;
+        }
+    }
+
+    // 黒番の禁手判定用の C-API
+    DLL_EXPORT int is_forbidden_for_black_c_api(const int* board_array, int move_idx) {
+        try {
+            if (move_idx < 0 || move_idx >= BOARD_CELLS) {
+                return 1; // 範囲外は安全のため禁手扱いにする
+            }
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            return is_forbidden_for_black(board, move_idx) ? 1 : 0;
+        } catch (...) {
+            return 1; // エラー時は禁手扱いにする
+        }
+    }
+
+    // 合法手マスクを一括取得する C-API
+    DLL_EXPORT void get_legal_moves_c_api(const int* board_array, int player, int* mask_out) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            for (int i = 0; i < BOARD_CELLS; ++i) {
+                if (board[i] != EMPTY) {
+                    mask_out[i] = 0;
+                } else if (player == BLACK) {
+                    mask_out[i] = is_forbidden_for_black(board, i) ? 0 : 1;
+                } else {
+                    mask_out[i] = 1;
+                }
+            }
+        } catch (...) {
+            if (mask_out != nullptr) {
+                std::fill(mask_out, mask_out + BOARD_CELLS, 0);
+            }
         }
     }
 }
