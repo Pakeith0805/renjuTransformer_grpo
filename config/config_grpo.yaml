@@ -14,7 +14,7 @@ seed: 42
 # GRPO 固有の設定グループ
 grpo:
   checkpoint_path: artifacts/checkpoints/best_model.pt
-  ref_checkpoint_path: artifacts/checkpoints/pretrained.pt
+  ref_checkpoint_path: models/pretrained.pt
   group_size: 8         # 1局面あたりにサンプリングする手の数 (G)
   beta: 0.04            # KLペナルティの強さの係数
   clip_eps: 0.2 
