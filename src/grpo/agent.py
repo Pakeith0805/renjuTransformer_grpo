@@ -8,6 +8,9 @@ from torch.distributions import Categorical
 
 from renju_transformer.rules import infer_player, winner_after_move, board_with_move, is_forbidden_for_black
 
+# TSS (VCFソルバーによる先読み支援) の有効・無効切り替え
+USE_TSS = False  # Falseに設定するとTSSを完全にオフにしてMCTSのみの探索を行います
+
 # DLLのロードと関数の初期化
 _mcts_lib = None
 
@@ -86,43 +89,44 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
             return 1.0 if winner == player else 0.0
 
         # VCFチェック
-        # 1. opponent に即勝ち（五連）の手がある場合は、敗退行為 (勝率0.0)
-        opp_immediate_wins = [
-            m for m in range(225)
-            if next_board[m] == 0
-            and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
-        ]
-        if opp_immediate_wins:
-            return 0.0
-
-        # 2. 自身 (player) に即勝ち（五連）にできる手があるかチェック
-        player_immediate_wins = [
-            m for m in range(225)
-            if next_board[m] == 0
-            and winner_after_move(board_with_move(next_board, m, player), m, player) == player
-        ]
-        if len(player_immediate_wins) >= 2:
-            return 1.0
-        elif len(player_immediate_wins) == 1:
-            block_idx = player_immediate_wins[0]
-            if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
-                return 1.0
-            else:
-                # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
-                blocked_board = board_with_move(next_board, block_idx, opponent)
-                if winner_after_move(blocked_board, block_idx, opponent) == opponent:
-                    return 1.0
-                blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
-                my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
-                if my_vcf >= 0:
-                    return 1.0
-
-        # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
-        if not player_immediate_wins:
-            next_board_array = (ctypes.c_int * 225)(*next_board)
-            opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
-            if opp_vcf >= 0:
+        if USE_TSS:
+            # 1. opponent に即勝ち（五連）の手がある場合は、敗退行為 (勝率0.0)
+            opp_immediate_wins = [
+                m for m in range(225)
+                if next_board[m] == 0
+                and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
+            ]
+            if opp_immediate_wins:
                 return 0.0
+
+            # 2. 自身 (player) に即勝ち（五連）にできる手があるかチェック
+            player_immediate_wins = [
+                m for m in range(225)
+                if next_board[m] == 0
+                and winner_after_move(board_with_move(next_board, m, player), m, player) == player
+            ]
+            if len(player_immediate_wins) >= 2:
+                return 1.0
+            elif len(player_immediate_wins) == 1:
+                block_idx = player_immediate_wins[0]
+                if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
+                    return 1.0
+                else:
+                    # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
+                    blocked_board = board_with_move(next_board, block_idx, opponent)
+                    if winner_after_move(blocked_board, block_idx, opponent) == opponent:
+                        return 0.0
+                    blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
+                    my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
+                    if my_vcf >= 0:
+                        return 1.0
+
+            # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
+            if not player_immediate_wins:
+                next_board_array = (ctypes.c_int * 225)(*next_board)
+                opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
+                if opp_vcf >= 0:
+                    return 0.0
 
         board_array = (ctypes.c_int * 225)(*board)
         win_rate = lib.run_mcts_c_api(board_array, move_idx, simulations, seed)
@@ -148,43 +152,44 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
             return 1.0 if winner == player else 0.0
 
         # VCFチェック
-        # 1. opponent に即勝ち（五連）の手がある場合は、敗退行為 (勝率0.0)
-        opp_immediate_wins = [
-            m for m in range(225)
-            if next_board[m] == 0
-            and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
-        ]
-        if opp_immediate_wins:
-            return 0.0
-
-        # 2. 自身 (player) に即勝ち（五連）にできる手があるかチェック
-        player_immediate_wins = [
-            m for m in range(225)
-            if next_board[m] == 0
-            and winner_after_move(board_with_move(next_board, m, player), m, player) == player
-        ]
-        if len(player_immediate_wins) >= 2:
-            return 1.0
-        elif len(player_immediate_wins) == 1:
-            block_idx = player_immediate_wins[0]
-            if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
-                return 1.0
-            else:
-                # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
-                blocked_board = board_with_move(next_board, block_idx, opponent)
-                if winner_after_move(blocked_board, block_idx, opponent) == opponent:
-                    return 1.0
-                blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
-                my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
-                if my_vcf >= 0:
-                    return 1.0
-
-        # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
-        if not player_immediate_wins:
-            next_board_array = (ctypes.c_int * 225)(*next_board)
-            opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
-            if opp_vcf >= 0:
+        if USE_TSS:
+            # 1. opponent に即勝ち（五連）の手がある場合は、敗退行為 (勝率0.0)
+            opp_immediate_wins = [
+                m for m in range(225)
+                if next_board[m] == 0
+                and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
+            ]
+            if opp_immediate_wins:
                 return 0.0
+
+            # 2. 自身 (player) に即勝ち（五連）にできる手があるかチェック
+            player_immediate_wins = [
+                m for m in range(225)
+                if next_board[m] == 0
+                and winner_after_move(board_with_move(next_board, m, player), m, player) == player
+            ]
+            if len(player_immediate_wins) >= 2:
+                return 1.0
+            elif len(player_immediate_wins) == 1:
+                block_idx = player_immediate_wins[0]
+                if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
+                    return 1.0
+                else:
+                    # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
+                    blocked_board = board_with_move(next_board, block_idx, opponent)
+                    if winner_after_move(blocked_board, block_idx, opponent) == opponent:
+                        return 0.0
+                    blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
+                    my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
+                    if my_vcf >= 0:
+                        return 1.0
+
+            # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
+            if not player_immediate_wins:
+                next_board_array = (ctypes.c_int * 225)(*next_board)
+                opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
+                if opp_vcf >= 0:
+                    return 0.0
 
         board_array = (ctypes.c_int * 225)(*board)
         probs_array = (ctypes.c_double * 225)(*prior_probs)
@@ -332,16 +337,18 @@ class GRPOAgent:
         current_player = infer_player(board_state)
         opponent = 2 if current_player == 1 else 1
 
-        # 1. 自身の VCF 勝ち手順があるかチェック
-        board_array = (ctypes.c_int * 225)(*board_state)
-        my_vcf = lib.solve_vcf_c_api(board_array, current_player, max_vcf_depth)
-        if my_vcf >= 0:
-            return my_vcf
+        # VCF勝ち手順・防御のチェック
+        if USE_TSS:
+            # 1. 自身の VCF 勝ち手順があるかチェック
+            board_array = (ctypes.c_int * 225)(*board_state)
+            my_vcf = lib.solve_vcf_c_api(board_array, current_player, max_vcf_depth)
+            if my_vcf >= 0:
+                return my_vcf
 
-        # 2. 相手の VCF 勝ち手順があるかチェック (ブロック)
-        opp_vcf = lib.solve_vcf_c_api(board_array, opponent, max_vcf_depth)
-        if opp_vcf >= 0:
-            return opp_vcf
+            # 2. 相手の VCF 勝ち手順があるかチェック (ブロック)
+            opp_vcf = lib.solve_vcf_c_api(board_array, opponent, max_vcf_depth)
+            if opp_vcf >= 0:
+                return opp_vcf
 
         legal_mask = self.tokenizer.legal_move_mask(board_state).to(self.device)
         legal_moves = [i for i, is_legal in enumerate(legal_mask.tolist()) if is_legal]
