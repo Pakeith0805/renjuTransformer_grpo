@@ -1,3 +1,10 @@
+// ============================================================================
+// MCTSの探索ロジックの切り替え
+// どちらか一方の #define を有効にしてください。
+#define MCTS_USE_UCB1   // UCB1ロジックを使用 (デフォルト)
+// #define MCTS_USE_PUCT   // モデルの事前確率（prior_prob）を用いたPUCTロジックを使用
+// ============================================================================
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -596,11 +603,12 @@ struct MCTSNode {
         return untried_moves.empty();
     }
 
-    // UCT(UCB1)値に基づく最適な子ノードの選択
+    // UCT(UCB1/PUCT)値に基づく最適な子ノードの選択
     MCTSNode* best_child(double exploration) const {
         if (children.empty()) {
             throw std::runtime_error("best_child called on a node with no children.");
         }
+#if defined(MCTS_USE_PUCT)
         const double sqrt_visits = std::sqrt(static_cast<double>(visits));
         auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
             const double exploitation = child->wins / static_cast<double>(child->visits);
@@ -608,6 +616,15 @@ struct MCTSNode {
                 exploration * child->prior_prob * sqrt_visits / (1.0 + child->visits);
             return exploitation + exploration_term;
         };
+#else // UCB1
+        const double log_visits = std::log(static_cast<double>(visits));
+        auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
+            const double exploitation = child->wins / static_cast<double>(child->visits);
+            const double exploration_term =
+                exploration * std::sqrt(log_visits / static_cast<double>(child->visits));
+            return exploitation + exploration_term;
+        };
+#endif
         const auto best_it = std::max_element(children.begin(), children.end(), [&](const auto& lhs, const auto& rhs) {
             return score_of(lhs) < score_of(rhs);
         });
