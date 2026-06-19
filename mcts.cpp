@@ -1,9 +1,4 @@
-// ============================================================================
-// MCTSの探索ロジックの切り替え
-// どちらか一方の #define を有効にしてください。
-#define MCTS_USE_UCB1   // UCB1ロジックを使用 (デフォルト)
-// #define MCTS_USE_PUCT   // モデルの事前確率（prior_prob）を用いたPUCTロジックを使用
-// ============================================================================
+// Dynamic control of TSS and UCB1/PUCT MCTS selection logic
 
 #include <algorithm>
 #include <array>
@@ -552,6 +547,7 @@ struct MCTSNode {
     double wins = 0.0;
     int visits = 0;
     double prior_prob = 1.0; // Prior probability from policy model (default: 1.0)
+    bool use_puct = true; // Added runtime flag
     std::vector<int> untried_moves;
     std::vector<std::unique_ptr<MCTSNode>> children;
 
@@ -564,7 +560,8 @@ struct MCTSNode {
         int move_played_value = -1,
         MCTSNode* parent_value = nullptr,
         int known_winner = NO_WINNER,
-        double prior_prob_value = 1.0
+        double prior_prob_value = 1.0,
+        bool use_puct_val = true
     )
         : board(board_value),
           player_to_move(player_value),
@@ -573,7 +570,8 @@ struct MCTSNode {
           move_played(move_played_value),
           parent(parent_value),
           terminal_winner(known_winner),
-          prior_prob(prior_prob_value) {
+          prior_prob(prior_prob_value),
+          use_puct(use_puct_val) {
         if (terminal_winner == NO_WINNER) {
             terminal_winner = board_winner(board);
         }
@@ -608,27 +606,31 @@ struct MCTSNode {
         if (children.empty()) {
             throw std::runtime_error("best_child called on a node with no children.");
         }
-#if defined(MCTS_USE_PUCT)
-        const double sqrt_visits = std::sqrt(static_cast<double>(visits));
-        auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
-            const double exploitation = child->wins / static_cast<double>(child->visits);
-            const double exploration_term =
-                exploration * child->prior_prob * sqrt_visits / (1.0 + child->visits);
-            return exploitation + exploration_term;
-        };
-#else // UCB1
-        const double log_visits = std::log(static_cast<double>(visits));
-        auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
-            const double exploitation = child->wins / static_cast<double>(child->visits);
-            const double exploration_term =
-                exploration * std::sqrt(log_visits / static_cast<double>(child->visits));
-            return exploitation + exploration_term;
-        };
-#endif
-        const auto best_it = std::max_element(children.begin(), children.end(), [&](const auto& lhs, const auto& rhs) {
-            return score_of(lhs) < score_of(rhs);
-        });
-        return best_it->get();
+        if (use_puct) {
+            const double sqrt_visits = std::sqrt(static_cast<double>(visits));
+            auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
+                const double exploitation = child->wins / static_cast<double>(child->visits);
+                const double exploration_term =
+                    exploration * child->prior_prob * sqrt_visits / (1.0 + child->visits);
+                return exploitation + exploration_term;
+            };
+            const auto best_it = std::max_element(children.begin(), children.end(), [&](const auto& lhs, const auto& rhs) {
+                return score_of(lhs) < score_of(rhs);
+            });
+            return best_it->get();
+        } else {
+            const double log_visits = std::log(static_cast<double>(visits));
+            auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
+                const double exploitation = child->wins / static_cast<double>(child->visits);
+                const double exploration_term =
+                    exploration * std::sqrt(log_visits / static_cast<double>(child->visits));
+                return exploitation + exploration_term;
+            };
+            const auto best_it = std::max_element(children.begin(), children.end(), [&](const auto& lhs, const auto& rhs) {
+                return score_of(lhs) < score_of(rhs);
+            });
+            return best_it->get();
+        }
     }
 
     // この局面から、まだ探索したことがない手をランダムに1つ選び、それを新しい子ノードとしてツリーに追加して展開する
@@ -652,7 +654,9 @@ struct MCTSNode {
             candidate_limit,
             move,
             this,
-            winner
+            winner,
+            1.0,
+            use_puct
         ));
         return children.back().get();
     }
@@ -708,7 +712,7 @@ int run_mcts(const Board& board, int player, const Options& options, const std::
         return root_moves.front();
     }
 
-    MCTSNode root(board, player, player, options.candidate_limit);
+    MCTSNode root(board, player, player, options.candidate_limit, -1, nullptr, NO_WINNER, 1.0, false);
     root.untried_moves = root_moves;
 
     for (int simulation = 0; simulation < options.simulations; ++simulation) {
@@ -1290,6 +1294,99 @@ int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
     return -1;
 }
 
+int solve_vcf_recursive_path(Board& board, int player, int depth, int& node_count, std::vector<int>& path) {
+    if (++node_count > 200000) {
+        return -1; // 20万ノードで強制打ち切り
+    }
+
+    // 1. 即座に勝てる（五連を作れる）手があるかチェック
+    std::vector<int> candidates = neighbor_candidates(board, 2);
+    for (int move : candidates) {
+        if (is_winning_move(board, move, player)) {
+            path.push_back(move);
+            return move;
+        }
+    }
+
+    if (depth <= 0) {
+        return -1;
+    }
+
+    const int opponent = other_player(player);
+
+    // 2. 「四」を作る脅威手（スレット）を探索
+    std::vector<int> threat_moves;
+    for (int move : candidates) {
+        if (creates_four_threat(board, move, player)) {
+            threat_moves.push_back(move);
+        }
+    }
+
+    // 各脅威手を深く探索
+    for (int move : threat_moves) {
+        // 攻撃側の石を置く
+        board[static_cast<std::size_t>(move)] = player;
+
+        // 次のターンで攻撃側が即勝利（五連）できる空きマスをカウント
+        std::vector<int> win_squares;
+        for (int win_move = 0; win_move < BOARD_CELLS; ++win_move) {
+            if (is_winning_move(board, win_move, player)) {
+                win_squares.push_back(win_move);
+            }
+        }
+
+        // 勝ちマスが2箇所以上あれば、防御側は防ぎきれないので勝利確定
+        if (win_squares.size() >= 2) {
+            board[static_cast<std::size_t>(move)] = EMPTY; // undo
+            path.push_back(move);
+            return move;
+        }
+
+        // 勝ちマスがちょうど1つの場合、防御側はそこを強制的にブロックしなければならない
+        if (win_squares.size() == 1) {
+            int block_move = win_squares[0];
+
+            // 防御側にとってブロックする手が合法であるか確認
+            if (opponent == BLACK && is_forbidden_for_black(board, block_move)) {
+                // 禁手のため防御側は打てない ＝ 攻撃側の勝利確定
+                board[static_cast<std::size_t>(move)] = EMPTY; // undo
+                path.push_back(move);
+                return move;
+            }
+
+            // 防御側の石を置いてブロックをシミュレート
+            board[static_cast<std::size_t>(block_move)] = opponent;
+
+            // ブロック手が相手の勝利にならないかチェック (相手の即勝ちを避けるため)
+            if (winner_after_move(board, block_move, opponent) == opponent) {
+                // 自滅手なのでこの分岐は無効
+                board[static_cast<std::size_t>(block_move)] = EMPTY; // undo block
+                board[static_cast<std::size_t>(move)] = EMPTY;       // undo move
+                continue;
+            }
+
+            // 再帰呼び出し
+            int next_win = solve_vcf_recursive_path(board, player, depth - 1, node_count, path);
+
+            // 元に戻す
+            board[static_cast<std::size_t>(block_move)] = EMPTY; // undo block
+            board[static_cast<std::size_t>(move)] = EMPTY;       // undo move
+
+            if (next_win != -1) {
+                // パスを記録 (呼び出し側で最後に反転して正しい順にする)
+                path.push_back(block_move);
+                path.push_back(move);
+                return move; // 勝ち手順を発見
+            }
+        } else {
+            // 勝ちマスがない
+            board[static_cast<std::size_t>(move)] = EMPTY;
+        }
+    }
+
+    return -1;
+}
+
 #ifdef _WIN32
 #define DLL_EXPORT __declspec(dllexport)
 #else
@@ -1387,7 +1484,8 @@ extern "C" {
         int move_idx, 
         int simulations, 
         std::uint64_t seed,
-        const double* prior_probs
+        const double* prior_probs,
+        int use_puct
     ) {
         try {
             Board board;
@@ -1432,7 +1530,7 @@ extern "C" {
                 return rate;
             }
 
-            MCTSNode root(next_board, next_player, player, options.candidate_limit);
+            MCTSNode root(next_board, next_player, player, options.candidate_limit, -1, nullptr, NO_WINNER, 1.0, use_puct != 0);
             root.untried_moves = root_moves;
 
             for (int simulation = 0; simulation < options.simulations; ++simulation) {
@@ -1480,7 +1578,8 @@ extern "C" {
         int simulations, 
         std::uint64_t seed,
         const double* prior_probs,
-        int* visits_out
+        int* visits_out,
+        int use_puct
     ) {
         try {
             Board board;
@@ -1509,7 +1608,7 @@ extern "C" {
             }
 
             // 現在の局面(board)をルートとする
-            MCTSNode root(board, player, other_player(player), options.candidate_limit);
+            MCTSNode root(board, player, other_player(player), options.candidate_limit, -1, nullptr, NO_WINNER, 1.0, use_puct != 0);
             root.untried_moves = root_moves;
 
             for (int simulation = 0; simulation < options.simulations; ++simulation) {
@@ -1571,6 +1670,30 @@ extern "C" {
             return solve_vcf_recursive(board, player, max_depth, node_count);
         } catch (...) {
             return -1;
+        }
+    }
+
+    // VCFの勝利手順（パス）を返す C-API
+    DLL_EXPORT int solve_vcf_path_c_api(const int* board_array, int player, int max_depth, int* path_out) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            int node_count = 0;
+            std::vector<int> path;
+            int res = solve_vcf_recursive_path(board, player, max_depth, node_count, path);
+            if (res == -1) {
+                return 0; // パスなし
+            }
+            // 記録された手順は逆順（葉ノードから）なので、反転する
+            std::reverse(path.begin(), path.end());
+            for (std::size_t i = 0; i < path.size(); ++i) {
+                path_out[i] = path[i];
+            }
+            return static_cast<int>(path.size());
+        } catch (...) {
+            return 0;
         }
     }
 

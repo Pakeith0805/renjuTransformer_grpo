@@ -22,3 +22,7 @@ grpo:
   epochs: 5             # 強化学習の総エポック数 (テスト用)
   trajectory_sample_prob: 0.8
   mcts_simulations: 200
+  use_tss_collection: false    # Trajectory collection TSS flag
+  use_tss_training: false      # GRPO training rollout TSS flag
+  use_puct_collection: false   # Trajectory collection PUCT flag (false = UCB1)
+  use_puct_training: false     # GRPO training rollout PUCT flag (false = UCB1)

@@ -78,7 +78,11 @@ def main(cfg: DictConfig) -> None:
         ref_model=ref_model,
         tokenizer=tokenizer,
         device=device,
-        mcts_simulations=mcts_simulations
+        mcts_simulations=mcts_simulations,
+        use_tss_collection=cfg.grpo.get("use_tss_collection", False),
+        use_tss_training=cfg.grpo.get("use_tss_training", False),
+        use_puct_collection=cfg.grpo.get("use_puct_collection", False),
+        use_puct_training=cfg.grpo.get("use_puct_training", False)
     )
     
     trainer = GRPOTrainer(

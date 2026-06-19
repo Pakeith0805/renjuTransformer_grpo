@@ -40,7 +40,8 @@ try:
         ctypes.c_int,                    # simulations
         ctypes.c_uint64,                 # seed
         ctypes.POINTER(ctypes.c_double), # prior_probs (None for pure MCTS)
-        ctypes.POINTER(ctypes.c_int)     # visits_out
+        ctypes.POINTER(ctypes.c_int),    # visits_out
+        ctypes.c_int                     # use_puct
     ]
     lib.run_mcts_c_api_with_policy_and_visits.restype = ctypes.c_double
 
@@ -115,7 +116,8 @@ def _run_mcts_search(board, simulations=1000):
         simulations,
         seed,
         None,
-        visits_array
+        visits_array,
+        0
     )
     
     visits = list(visits_array)

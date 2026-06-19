@@ -95,6 +95,14 @@ class GRPOTrainer:
 
         self.optimizer.step()
 
+        # Check if TSS is enabled for training rollouts and extract VCF paths
+        new_trajectory_boards = []
+        if self.agent.use_tss_training:
+            for i, move_idx in enumerate(move_indices):
+                if abs(rewards[i] - 1.0) < 1e-5 or abs(rewards[i] + 1.0) < 1e-5:
+                    states = self.agent.get_vcf_path_states(board_state, move_idx)
+                    new_trajectory_boards.extend(states)
+
         mean_reward = sum(rewards) / len(rewards)
 
         return {
@@ -103,7 +111,8 @@ class GRPOTrainer:
             "kl_loss": kl_loss.item(),
             "mean_reward": mean_reward,
             "rewards": rewards,  # 個々の勝敗ログ
-            "final_board": last_final_board
+            "final_board": last_final_board,
+            "new_trajectory_boards": new_trajectory_boards
         }
     
     def collect_trajectory_boards(self) -> list[list[int]]:
@@ -231,6 +240,17 @@ class GRPOTrainer:
                     beta=self.cfg.grpo.beta, 
                     clip_eps=self.cfg.grpo.clip_eps
                 )
+                
+                # Check for new VCF boards and add them to trajectory pool
+                if "new_trajectory_boards" in metrics and metrics["new_trajectory_boards"]:
+                    valid_new_boards = [
+                        b for b in metrics["new_trajectory_boards"]
+                        if self.agent.tokenizer.legal_move_mask(b).any()
+                    ]
+                    if valid_new_boards:
+                        trajectory_boards.extend(valid_new_boards)
+                        if len(trajectory_boards) > 1000:
+                            trajectory_boards = trajectory_boards[-1000:]
                 
                 # メトリクス（Loss、KL、平均報酬）を MLflow に記録
                 mlflow.log_metric("grpo_loss", metrics["loss"], step=iteration)

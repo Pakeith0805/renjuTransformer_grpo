@@ -41,7 +41,8 @@ def _get_mcts_lib():
             ctypes.c_int,                    # move_idx
             ctypes.c_int,                    # simulations
             ctypes.c_uint64,                 # seed
-            ctypes.POINTER(ctypes.c_double)  # prior_probs
+            ctypes.POINTER(ctypes.c_double), # prior_probs
+            ctypes.c_int                     # use_puct
         ]
         _mcts_lib.run_mcts_c_api_with_policy.restype = ctypes.c_double
 
@@ -51,7 +52,8 @@ def _get_mcts_lib():
             ctypes.c_int,                    # simulations
             ctypes.c_uint64,                 # seed
             ctypes.POINTER(ctypes.c_double), # prior_probs
-            ctypes.POINTER(ctypes.c_int)     # visits_out
+            ctypes.POINTER(ctypes.c_int),    # visits_out
+            ctypes.c_int                     # use_puct
         ]
         _mcts_lib.run_mcts_c_api_with_policy_and_visits.restype = ctypes.c_double
 
@@ -63,6 +65,15 @@ def _get_mcts_lib():
         ]
         _mcts_lib.solve_vcf_c_api.restype = ctypes.c_int
 
+        # VCFソルバーパス付きC-API型定義
+        _mcts_lib.solve_vcf_path_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int),    # board_array
+            ctypes.c_int,                    # player
+            ctypes.c_int,                    # max_depth
+            ctypes.POINTER(ctypes.c_int)     # path_out
+        ]
+        _mcts_lib.solve_vcf_path_c_api.restype = ctypes.c_int
+
         # 黒番の禁手判定C-APIの型定義を追加
         _mcts_lib.is_forbidden_for_black_c_api.argtypes = [
             ctypes.POINTER(ctypes.c_int),    # board_array
@@ -72,7 +83,8 @@ def _get_mcts_lib():
 
     return _mcts_lib
 
-def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12) -> float:
+def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12,
+                  use_tss: bool = False, use_puct: bool = False) -> float:
     try:
         lib = _get_mcts_lib()
         player = infer_player(board)
@@ -89,7 +101,7 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
             return 1.0 if winner == player else 0.0
 
         # VCFチェック
-        if USE_TSS:
+        if use_tss:
             # 1. opponent に即勝ち（五連）の手がある場合は、敗退行為 (勝率0.0)
             opp_immediate_wins = [
                 m for m in range(225)
@@ -135,7 +147,9 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
         print(f"Error running MCTS eval (DLL): {e}", file=sys.stderr)
         return 0.5
 
-def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list[float], simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12) -> float:
+def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list[float], 
+                              simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12,
+                              use_tss: bool = False, use_puct: bool = False) -> float:
     try:
         lib = _get_mcts_lib()
         player = infer_player(board)
@@ -152,7 +166,7 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
             return 1.0 if winner == player else 0.0
 
         # VCFチェック
-        if USE_TSS:
+        if use_tss:
             # 1. opponent に即勝ち（五連）の手がある場合は、敗退行為 (勝率0.0)
             opp_immediate_wins = [
                 m for m in range(225)
@@ -193,33 +207,51 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
 
         board_array = (ctypes.c_int * 225)(*board)
         probs_array = (ctypes.c_double * 225)(*prior_probs)
-        win_rate = lib.run_mcts_c_api_with_policy(board_array, move_idx, simulations, seed, probs_array)
+        win_rate = lib.run_mcts_c_api_with_policy(board_array, move_idx, simulations, seed, probs_array, 1 if use_puct else 0)
         return win_rate
     except Exception as e:
         print(f"Error running MCTS eval with policy (DLL): {e}", file=sys.stderr)
         return 0.5
 
-def run_mcts_eval_with_policy_and_visits(board: list[int], simulations: int, seed: int, prior_probs: list[float]) -> tuple[float, list[int]]:
+def run_mcts_eval_with_policy_and_visits(board: list[int], simulations: int, seed: int, prior_probs: list[float],
+                                         use_puct: bool = False) -> tuple[float, list[int]]:
     try:
         lib = _get_mcts_lib()
         board_array = (ctypes.c_int * 225)(*board)
         probs_array = (ctypes.c_double * 225)(*prior_probs)
         visits_array = (ctypes.c_int * 225)()
         
-        win_rate = lib.run_mcts_c_api_with_policy_and_visits(board_array, simulations, seed, probs_array, visits_array)
+        win_rate = lib.run_mcts_c_api_with_policy_and_visits(board_array, simulations, seed, probs_array, visits_array, 1 if use_puct else 0)
         
         return win_rate, list(visits_array)
     except Exception as e:
         print(f"Error running MCTS eval with policy and visits (DLL): {e}", file=sys.stderr)
         return 0.5, [0] * 225
 
+def reconstruct_winning_states(start_board: list[int], path: list[int], win_player: int) -> list[list[int]]:
+    states = []
+    curr_board = start_board.copy()
+    curr_player = win_player
+    for move in path:
+        if curr_player == win_player:
+            states.append(curr_board.copy())
+        curr_board = board_with_move(curr_board, move, curr_player)
+        curr_player = 2 if curr_player == 1 else 1
+    return states
+
 class GRPOAgent:
-    def __init__(self, policy_model, ref_model, tokenizer, device, mcts_simulations=200):
+    def __init__(self, policy_model, ref_model, tokenizer, device, mcts_simulations=200,
+                 use_tss_collection=False, use_tss_training=False,
+                 use_puct_collection=False, use_puct_training=False):
         self.policy = policy_model
         self.ref = ref_model
         self.tokenizer = tokenizer
         self.device = device
         self.mcts_simulations = mcts_simulations
+        self.use_tss_collection = use_tss_collection
+        self.use_tss_training = use_tss_training
+        self.use_puct_collection = use_puct_collection
+        self.use_puct_training = use_puct_training
         # あらかじめメインスレッドでDLLをロードし、スレッド間の初期化競合を防ぐ
         try:
             _get_mcts_lib()
@@ -259,7 +291,10 @@ class GRPOAgent:
             masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
             probs = torch.softmax(masked_logits, dim=-1).cpu().numpy().tolist()
 
-        win_rate = run_mcts_eval_with_policy(initial_board_state, first_move_idx, probs, self.mcts_simulations)
+        win_rate = run_mcts_eval_with_policy(
+            initial_board_state, first_move_idx, probs, self.mcts_simulations,
+            use_tss=self.use_tss_training, use_puct=self.use_puct_training
+        )
         reward = 2.0 * win_rate - 1.0 # 0～1を-1～1に変換している
         
         # 視覚化のためにボードを返している。本来不要。
@@ -303,7 +338,9 @@ class GRPOAgent:
                     move_idx, 
                     batch_probs[i],
                     self.mcts_simulations,
-                    seed=42 + i * 997 # MCTsが同じ挙動をしないようにシードを散らす
+                    seed=42 + i * 997, # MCTsが同じ挙動をしないようにシードを散らす
+                    use_tss=self.use_tss_training,
+                    use_puct=self.use_puct_training
                 ): i
                 for i, move_idx in enumerate(move_indices)
             }
@@ -325,7 +362,8 @@ class GRPOAgent:
             
         return rewards, last_board
 
-    def select_move_via_mcts(self, board_state, simulations=1000, temperature=1.0, use_noise=True, max_vcf_depth=12) -> int:
+    def select_move_via_mcts(self, board_state, simulations=1000, temperature=1.0, use_noise=True, max_vcf_depth=12,
+                             use_tss=None, use_puct=None) -> int:
         """モデルにガイドされた単一のMCTS探索を実行し、
         各候補手の訪問回数に基づいて確率的（あるいは決定論的）に指し手を選択します。
         ディリクレノイズおよび温度パラメータを適用して探索の多様性を確保します。
@@ -333,12 +371,17 @@ class GRPOAgent:
         import numpy as np
         import random
 
+        if use_tss is None:
+            use_tss = self.use_tss_collection
+        if use_puct is None:
+            use_puct = self.use_puct_collection
+
         lib = _get_mcts_lib()
         current_player = infer_player(board_state)
         opponent = 2 if current_player == 1 else 1
 
         # VCF勝ち手順・防御のチェック
-        if USE_TSS:
+        if use_tss:
             # 1. 自身の VCF 勝ち手順があるかチェック
             board_array = (ctypes.c_int * 225)(*board_state)
             my_vcf = lib.solve_vcf_c_api(board_array, current_player, max_vcf_depth)
@@ -391,7 +434,7 @@ class GRPOAgent:
         # 3. 単一 MCTS 探索の実行 (訪問回数 visits_out の取得)
         seed = random.randint(0, 2**32 - 1)
         win_rate, visits = run_mcts_eval_with_policy_and_visits(
-            board_state, simulations, seed, prior_probs_list
+            board_state, simulations, seed, prior_probs_list, use_puct=use_puct
         )
         
         visits_np = np.array(visits, dtype=np.float32)
@@ -430,3 +473,70 @@ class GRPOAgent:
             
             # 指し手をサンプリング
             return int(np.random.choice(225, p=probs))
+
+    def get_vcf_path(self, board: list[int], player: int, max_depth: int = 12) -> list[int]:
+        lib = _get_mcts_lib()
+        board_array = (ctypes.c_int * 225)(*board)
+        path_array = (ctypes.c_int * 256)()
+        path_len = lib.solve_vcf_path_c_api(board_array, player, max_depth, path_array)
+        if path_len <= 0:
+            return []
+        return list(path_array)[:path_len]
+
+    def get_vcf_winning_path_and_player(self, board: list[int], move_idx: int) -> tuple[int, list[int], list[int]] | None:
+        """
+        Given the board before the move and the move_idx played, check if a VCF win is achieved.
+        Returns: (winning_player, start_board_for_path, path_moves) or None
+        """
+        player = infer_player(board)
+        opponent = 2 if player == 1 else 1
+        next_board = board_with_move(board, move_idx, player)
+        
+        # We check the same VCF conditions as run_mcts_eval_with_policy
+        # 1. Opponent has immediate win?
+        opp_immediate_wins = [
+            m for m in range(225)
+            if next_board[m] == 0
+            and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
+        ]
+        if opp_immediate_wins:
+            return None
+
+        # 2. Player has immediate win?
+        player_immediate_wins = [
+            m for m in range(225)
+            if next_board[m] == 0
+            and winner_after_move(board_with_move(next_board, m, player), m, player) == player
+        ]
+        
+        lib = _get_mcts_lib()
+        max_vcf_depth = 12
+        
+        if len(player_immediate_wins) >= 2:
+            return None
+        elif len(player_immediate_wins) == 1:
+            block_idx = player_immediate_wins[0]
+            if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
+                return None
+            else:
+                blocked_board = board_with_move(next_board, block_idx, opponent)
+                if winner_after_move(blocked_board, block_idx, opponent) == opponent:
+                    return None
+                
+                path = self.get_vcf_path(blocked_board, player, max_vcf_depth)
+                if path:
+                    full_path = [block_idx] + path
+                    return player, next_board, full_path
+        else:
+            opp_path = self.get_vcf_path(next_board, opponent, max_vcf_depth)
+            if opp_path:
+                return opponent, next_board, opp_path
+                
+        return None
+
+    def get_vcf_path_states(self, board: list[int], move_idx: int) -> list[list[int]]:
+        res = self.get_vcf_winning_path_and_player(board, move_idx)
+        if res is None:
+            return []
+        win_player, start_board_for_path, path_moves = res
+        return reconstruct_winning_states(start_board_for_path, path_moves, win_player)
