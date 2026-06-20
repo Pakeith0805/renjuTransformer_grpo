@@ -81,6 +81,13 @@ def _get_mcts_lib():
         ]
         _mcts_lib.is_forbidden_for_black_c_api.restype = ctypes.c_int
 
+        # 手数ペナルティ設定用 C-API
+        _mcts_lib.set_length_penalty_c_api.argtypes = [
+            ctypes.c_int,                    # use_penalty
+            ctypes.c_double                  # coef
+        ]
+        _mcts_lib.set_length_penalty_c_api.restype = None
+
     return _mcts_lib
 
 def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12,
@@ -149,7 +156,8 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
 
 def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list[float], 
                               simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12,
-                              use_tss: bool = False, use_puct: bool = False) -> float:
+                              use_tss: bool = False, use_puct: bool = False,
+                              use_length_penalty: bool = False, length_penalty_coef: float = 0.02) -> float:
     try:
         lib = _get_mcts_lib()
         player = infer_player(board)
@@ -162,8 +170,14 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
 
         next_board = board_with_move(board, move_idx, player)
         winner = winner_after_move(next_board, move_idx, player)
+        
+        mcts_coef = length_penalty_coef / 2.0
+        
         if winner is not None:
-            return 1.0 if winner == player else 0.0
+            if winner == player:
+                return 1.0 - mcts_coef * 1 if use_length_penalty else 1.0
+            else:
+                return 0.0 + mcts_coef * 1 if use_length_penalty else 0.0
 
         # VCFチェック
         if use_tss:
@@ -174,7 +188,7 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
                 and winner_after_move(board_with_move(next_board, m, opponent), m, opponent) == opponent
             ]
             if opp_immediate_wins:
-                return 0.0
+                return 0.0 + mcts_coef * 2 if use_length_penalty else 0.0
 
             # 2. 自身 (player) に即勝ち（五連）にできる手があるかチェック
             player_immediate_wins = [
@@ -183,27 +197,42 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
                 and winner_after_move(board_with_move(next_board, m, player), m, player) == player
             ]
             if len(player_immediate_wins) >= 2:
-                return 1.0
+                return 1.0 - mcts_coef * 3 if use_length_penalty else 1.0
             elif len(player_immediate_wins) == 1:
                 block_idx = player_immediate_wins[0]
                 if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
-                    return 1.0
+                    return 1.0 - mcts_coef * 3 if use_length_penalty else 1.0
                 else:
                     # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
                     blocked_board = board_with_move(next_board, block_idx, opponent)
                     if winner_after_move(blocked_board, block_idx, opponent) == opponent:
-                        return 0.0
+                        return 0.0 + mcts_coef * 3 if use_length_penalty else 0.0
                     blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
                     my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
                     if my_vcf >= 0:
-                        return 1.0
+                        if use_length_penalty:
+                            path_array = (ctypes.c_int * 256)()
+                            path_len = lib.solve_vcf_path_c_api(blocked_board_array, player, max_vcf_depth, path_array)
+                            total_len = 2 + (path_len if path_len > 0 else 0)
+                            return 1.0 - mcts_coef * total_len
+                        else:
+                            return 1.0
 
             # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
             if not player_immediate_wins:
                 next_board_array = (ctypes.c_int * 225)(*next_board)
                 opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
                 if opp_vcf >= 0:
-                    return 0.0
+                    if use_length_penalty:
+                        path_array = (ctypes.c_int * 256)()
+                        path_len = lib.solve_vcf_path_c_api(next_board_array, opponent, max_vcf_depth, path_array)
+                        total_len = 1 + (path_len if path_len > 0 else 0)
+                        return 0.0 + mcts_coef * total_len
+                    else:
+                        return 0.0
+
+        # DLLに手数ペナルティ設定を設定
+        lib.set_length_penalty_c_api(1 if use_length_penalty else 0, mcts_coef)
 
         board_array = (ctypes.c_int * 225)(*board)
         probs_array = (ctypes.c_double * 225)(*prior_probs)
@@ -288,7 +317,8 @@ class GRPOAgent:
 
         return sample_actions, log_probs_policy, log_probs_ref, exact_kl
     
-    def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0) -> tuple[float, list[int]]:
+    def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0,
+                            use_length_penalty: bool = False, length_penalty_coef: float = 0.02) -> tuple[float, list[int]]:
         """互換性のための直列版（実際には rollout_group を推奨）"""
         player = infer_player(initial_board_state)
         next_board = board_with_move(initial_board_state, first_move_idx, player)
@@ -301,7 +331,8 @@ class GRPOAgent:
 
         win_rate = run_mcts_eval_with_policy(
             initial_board_state, first_move_idx, probs, self.mcts_simulations,
-            use_tss=self.use_tss_training, use_puct=self.use_puct_training
+            use_tss=self.use_tss_training, use_puct=self.use_puct_training,
+            use_length_penalty=use_length_penalty, length_penalty_coef=length_penalty_coef
         )
         reward = 2.0 * win_rate - 1.0 # 0～1を-1～1に変換している
         
@@ -311,7 +342,8 @@ class GRPOAgent:
         board[first_move_idx] = first_player
         return reward, board
 
-    def rollout_group(self, initial_board_state, move_indices) -> tuple[list[float], list[int]]:
+    def rollout_group(self, initial_board_state, move_indices,
+                      use_length_penalty: bool = False, length_penalty_coef: float = 0.02) -> tuple[list[float], list[int]]:
         """指定された複数の着手を並列でMCTS評価し、報酬リストを返します"""
         rewards = [0.0] * len(move_indices)
         
@@ -348,7 +380,9 @@ class GRPOAgent:
                     self.mcts_simulations,
                     seed=42 + i * 997, # MCTsが同じ挙動をしないようにシードを散らす
                     use_tss=self.use_tss_training,
-                    use_puct=self.use_puct_training
+                    use_puct=self.use_puct_training,
+                    use_length_penalty=use_length_penalty,
+                    length_penalty_coef=length_penalty_coef
                 ): i
                 for i, move_idx in enumerate(move_indices)
             }

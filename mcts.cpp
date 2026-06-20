@@ -35,6 +35,10 @@ constexpr int DEFAULT_CANDIDATE_LIMIT = 16;
 constexpr int DEFAULT_ROLLOUT_LIMIT = 16;
 constexpr double DEFAULT_EXPLORATION = 1.4;
 
+bool g_use_length_penalty = false;
+double g_length_penalty_coef = 0.02;
+
+
 // 要素数225の整数配列にboardという名前をつけている。usingは別名定義(型エイリアス)
 //std::arrayは固定長配列の定義。
 //<要素の型, 要素数>
@@ -670,14 +674,21 @@ struct MCTSNode {
             wins += 1.0;
         }
     }
+
+    void update(double score) {
+        ++visits;
+        wins += score;
+    }
 };
 
 // 探索ツリーの端に達した局面から、ゲームが決着するまで、脳内でモンテカルロ自己対戦を走らせて勝敗結果を予測する
 template <typename URNG>
-int rollout(Board board, int player, const Options& options, URNG& rng) {
+int rollout(Board board, int player, const Options& options, URNG& rng, int& steps_taken) {
     int current_player = player;
+    steps_taken = 0;
 
     for (int step = 0; step < options.rollout_limit; ++step) {
+        steps_taken++;
         std::vector<int> legal_moves = generate_policy_moves(board, current_player, options.candidate_limit);
         if (legal_moves.empty()) {
             if (board_is_full(board)) {
@@ -700,6 +711,12 @@ int rollout(Board board, int player, const Options& options, URNG& rng) {
     }
 
     return DRAW;
+}
+
+template <typename URNG>
+int rollout(Board board, int player, const Options& options, URNG& rng) {
+    int dummy_steps = 0;
+    return rollout(board, player, options, rng, dummy_steps);
 }
 
 // 探索の中心的な手順を実行する司令塔関数。simulationsの回数だけ、手の選択から逆伝播まですべて行う
@@ -727,14 +744,43 @@ int run_mcts(const Board& board, int player, const Options& options, const std::
         }
 
         int winner = DRAW;
+        int rollout_steps = 0;
         if (node->is_terminal()) {
             winner = node->terminal_winner;
         } else {
-            winner = rollout(node->board, node->player_to_move, options, rng);
+            winner = rollout(node->board, node->player_to_move, options, rng, rollout_steps);
+        }
+
+        double score = 0.5;
+        if (g_use_length_penalty) {
+            int depth = 0;
+            MCTSNode* temp = node;
+            while (temp->parent != nullptr) {
+                depth++;
+                temp = temp->parent;
+            }
+            int total_steps = depth + rollout_steps;
+            if (winner == root.root_player) {
+                score = 1.0 - g_length_penalty_coef * total_steps;
+                if (score < 0.5) score = 0.5;
+            } else if (winner == DRAW) {
+                score = 0.5;
+            } else {
+                score = 0.0 + g_length_penalty_coef * total_steps;
+                if (score > 0.5) score = 0.5;
+            }
+        } else {
+            if (winner == root.root_player) {
+                score = 1.0;
+            } else if (winner == DRAW) {
+                score = 0.5;
+            } else {
+                score = 0.0;
+            }
         }
 
         while (node != nullptr) {
-            node->update(winner);
+            node->update(score);
             node = node->parent;
         }
     }
@@ -1550,14 +1596,43 @@ extern "C" {
                 }
 
                 int winner = DRAW;
+                int rollout_steps = 0;
                 if (node->is_terminal()) {
                     winner = node->terminal_winner;
                 } else {
-                    winner = rollout(node->board, node->player_to_move, options, rng);
+                    winner = rollout(node->board, node->player_to_move, options, rng, rollout_steps);
+                }
+
+                double score = 0.5;
+                if (g_use_length_penalty) {
+                    int depth = 0;
+                    MCTSNode* temp = node;
+                    while (temp->parent != nullptr) {
+                        depth++;
+                        temp = temp->parent;
+                    }
+                    int total_steps = depth + rollout_steps;
+                    if (winner == root.root_player) {
+                        score = 1.0 - g_length_penalty_coef * total_steps;
+                        if (score < 0.5) score = 0.5;
+                    } else if (winner == DRAW) {
+                        score = 0.5;
+                    } else {
+                        score = 0.0 + g_length_penalty_coef * total_steps;
+                        if (score > 0.5) score = 0.5;
+                    }
+                } else {
+                    if (winner == root.root_player) {
+                        score = 1.0;
+                    } else if (winner == DRAW) {
+                        score = 0.5;
+                    } else {
+                        score = 0.0;
+                    }
                 }
 
                 while (node != nullptr) {
-                    node->update(winner);
+                    node->update(score);
                     node = node->parent;
                 }
             }
@@ -1628,14 +1703,43 @@ extern "C" {
                 }
 
                 int winner = DRAW;
+                int rollout_steps = 0;
                 if (node->is_terminal()) {
                     winner = node->terminal_winner;
                 } else {
-                    winner = rollout(node->board, node->player_to_move, options, rng);
+                    winner = rollout(node->board, node->player_to_move, options, rng, rollout_steps);
+                }
+
+                double score = 0.5;
+                if (g_use_length_penalty) {
+                    int depth = 0;
+                    MCTSNode* temp = node;
+                    while (temp->parent != nullptr) {
+                        depth++;
+                        temp = temp->parent;
+                    }
+                    int total_steps = depth + rollout_steps;
+                    if (winner == root.root_player) {
+                        score = 1.0 - g_length_penalty_coef * total_steps;
+                        if (score < 0.5) score = 0.5;
+                    } else if (winner == DRAW) {
+                        score = 0.5;
+                    } else {
+                        score = 0.0 + g_length_penalty_coef * total_steps;
+                        if (score > 0.5) score = 0.5;
+                    }
+                } else {
+                    if (winner == root.root_player) {
+                        score = 1.0;
+                    } else if (winner == DRAW) {
+                        score = 0.5;
+                    } else {
+                        score = 0.0;
+                    }
                 }
 
                 while (node != nullptr) {
-                    node->update(winner);
+                    node->update(score);
                     node = node->parent;
                 }
             }
@@ -1734,6 +1838,12 @@ extern "C" {
                 std::fill(mask_out, mask_out + BOARD_CELLS, 0);
             }
         }
+    }
+
+    // 手数ペナルティの設定用 C-API
+    DLL_EXPORT void set_length_penalty_c_api(int use_penalty, double coef) {
+        g_use_length_penalty = (use_penalty != 0);
+        g_length_penalty_coef = coef;
     }
 }
 

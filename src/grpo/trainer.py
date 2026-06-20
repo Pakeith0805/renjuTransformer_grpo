@@ -6,7 +6,7 @@ from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf
 import mlflow
-from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black
+from renju_transformer.rules import infer_player, winner_after_move, is_forbidden_for_black, board_with_move
 from torch.distributions import Categorical
 from grpo.load_model import print_board
 
@@ -73,7 +73,14 @@ class GRPOTrainer:
 
         # 報酬を回収 (並列 MCTS 評価)
         move_indices = [actions[i].item() for i in range(len(actions))]
-        rewards, last_final_board = self.agent.rollout_group(board_state, move_indices)
+        use_penalty = self.cfg.grpo.get("use_length_penalty", False)
+        penalty_coef = self.cfg.grpo.get("length_penalty_coef", 0.02)
+        rewards, last_final_board = self.agent.rollout_group(
+            board_state, 
+            move_indices,
+            use_length_penalty=use_penalty,
+            length_penalty_coef=penalty_coef
+        )
 
         advantages = compute_group_advantages(rewards)
 
@@ -103,13 +110,18 @@ class GRPOTrainer:
         vcf_win_count = 0
         vcf_path_lengths = []
         if self.agent.use_tss_training:
+            player = infer_player(board_state)
             for i, move_idx in enumerate(move_indices):
-                if abs(rewards[i] - 1.0) < 1e-5 or abs(rewards[i] + 1.0) < 1e-5:
+                # 盤面状態から即時勝利またはVCF勝ち手順があるかをチェック
+                next_board = board_with_move(board_state, move_idx, player)
+                winner = winner_after_move(next_board, move_idx, player)
+                res = self.agent.get_vcf_winning_path_and_player(board_state, move_idx)
+                
+                if winner is not None or res is not None:
                     states = self.agent.get_vcf_path_states(board_state, move_idx)
                     if states:
                         new_trajectory_boards.extend(states)
                         vcf_win_count += 1
-                        res = self.agent.get_vcf_winning_path_and_player(board_state, move_idx)
                         if res is not None:
                             _, _, path_moves = res
                             vcf_path_lengths.append(len(path_moves))
