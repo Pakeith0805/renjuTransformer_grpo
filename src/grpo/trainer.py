@@ -49,6 +49,9 @@ def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1
     mean = rewards.mean()
     std = rewards.std()
 
+    if std < 1e-6:
+        return torch.zeros_like(rewards)
+
     advantages = (rewards - mean) / (std + eps)
 
     return advantages
@@ -62,7 +65,7 @@ class GRPOTrainer:
 
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
-        actions, log_probs_policy, log_probs_ref = self.agent.get_group_actions(
+        actions, log_probs_policy, log_probs_ref, exact_kl = self.agent.get_group_actions(
             board_state, 
             group_size=8, 
             temperature=self.cfg.grpo.temperature
@@ -91,28 +94,53 @@ class GRPOTrainer:
 
         total_loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(self.agent.policy.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.agent.policy.parameters(), max_norm=1.0)
 
         self.optimizer.step()
 
         # Check if TSS is enabled for training rollouts and extract VCF paths
         new_trajectory_boards = []
+        vcf_win_count = 0
+        vcf_path_lengths = []
         if self.agent.use_tss_training:
             for i, move_idx in enumerate(move_indices):
                 if abs(rewards[i] - 1.0) < 1e-5 or abs(rewards[i] + 1.0) < 1e-5:
                     states = self.agent.get_vcf_path_states(board_state, move_idx)
-                    new_trajectory_boards.extend(states)
+                    if states:
+                        new_trajectory_boards.extend(states)
+                        vcf_win_count += 1
+                        res = self.agent.get_vcf_winning_path_and_player(board_state, move_idx)
+                        if res is not None:
+                            _, _, path_moves = res
+                            vcf_path_lengths.append(len(path_moves))
 
         mean_reward = sum(rewards) / len(rewards)
+        variance = sum((r - mean_reward) ** 2 for r in rewards) / len(rewards)
+        std_reward = variance ** 0.5
+
+        avg_vcf_path_length = float(sum(vcf_path_lengths)) / len(vcf_path_lengths) if vcf_path_lengths else 0.0
+        new_vcf_injections = len(new_trajectory_boards)
+
+        start_player = infer_player(board_state)
+        black_reward = mean_reward if start_player == 1 else None
+        white_reward = mean_reward if start_player == 2 else None
 
         return {
             "loss": total_loss.item(),
             "policy_loss": policy_loss.item(),
             "kl_loss": kl_loss.item(),
+            "exact_kl": exact_kl,
             "mean_reward": mean_reward,
+            "std_reward": std_reward,
+            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm),
             "rewards": rewards,  # 個々の勝敗ログ
             "final_board": last_final_board,
-            "new_trajectory_boards": new_trajectory_boards
+            "new_trajectory_boards": new_trajectory_boards,
+            "vcf_win_count": vcf_win_count,
+            "avg_vcf_path_length": avg_vcf_path_length,
+            "new_vcf_injections": new_vcf_injections,
+            "black_reward": black_reward,
+            "white_reward": white_reward
         }
     
     def collect_trajectory_boards(self) -> list[list[int]]:
@@ -252,16 +280,29 @@ class GRPOTrainer:
                         if len(trajectory_boards) > 1000:
                             trajectory_boards = trajectory_boards[-1000:]
                 
-                # メトリクス（Loss、KL、平均報酬）を MLflow に記録
+                # メトリクスを MLflow に記録
                 mlflow.log_metric("grpo_loss", metrics["loss"], step=iteration)
+                mlflow.log_metric("grpo_policy_loss", metrics["policy_loss"], step=iteration)
                 mlflow.log_metric("grpo_kl", metrics["kl_loss"], step=iteration)
+                mlflow.log_metric("grpo_exact_kl", metrics["exact_kl"], step=iteration)
                 mlflow.log_metric("grpo_mean_reward", metrics["mean_reward"], step=iteration)
+                mlflow.log_metric("grpo_std_reward", metrics["std_reward"], step=iteration)
+                mlflow.log_metric("grpo_grad_norm", metrics["grad_norm"], step=iteration)
+                mlflow.log_metric("grpo_vcf_win_count", metrics["vcf_win_count"], step=iteration)
+                mlflow.log_metric("grpo_avg_vcf_path_length", metrics["avg_vcf_path_length"], step=iteration)
+                mlflow.log_metric("grpo_new_vcf_injections", metrics["new_vcf_injections"], step=iteration)
+                
+                if metrics["black_reward"] is not None:
+                    mlflow.log_metric("grpo_black_reward", metrics["black_reward"], step=iteration)
+                if metrics["white_reward"] is not None:
+                    mlflow.log_metric("grpo_white_reward", metrics["white_reward"], step=iteration)
                 
                 # 画面の進捗バーの表示を更新
                 progress.set_postfix(
                     loss=f"{metrics['loss']:.4f}",
                     kl=f"{metrics['kl_loss']:.4f}",
-                    reward=f"{metrics['mean_reward']:+.2f}"
+                    reward=f"{metrics['mean_reward']:+.2f}",
+                    vcf=metrics["vcf_win_count"]
                 )
                 
                 # 1イテレーション（エポック）終了ごとに、自己対戦の最終盤面を表示
@@ -279,3 +320,106 @@ class GRPOTrainer:
                         "trajectory_boards": trajectory_boards  # 局面プールも保存して途中再開できるようにする
                     }, checkpoint_path)
                     print(f"\nSaved checkpoint to {checkpoint_path}")
+
+                # 100エポックに一回、あるいは開始エポックに、事前学習済みモデルとの評価対局を実行
+                if iteration == start_iteration or iteration % 100 == 0:
+                    # temperature=1.0 での対局 (100ゲーム)
+                    print(f"\n[Iteration {iteration}] Running versus evaluation against pretrained model (100 games, temperature=1.0)...")
+                    eval_results = self.evaluate_versus(num_games=100, temperature=1.0)
+                    print(f"  Policy Win Rate (temp=1.0): {eval_results['policy_win_rate']:.1f}%")
+                    print(f"  Reference Win Rate (temp=1.0): {eval_results['ref_win_rate']:.1f}%")
+                    print(f"  Draw Rate (temp=1.0): {eval_results['draw_rate']:.1f}%")
+                    print(f"  Average Game Length (temp=1.0): {eval_results['avg_plies']:.1f} plies")
+                    
+                    # MLflow に記録
+                    mlflow.log_metric("versus_policy_win_rate", eval_results["policy_win_rate"], step=iteration)
+                    mlflow.log_metric("versus_ref_win_rate", eval_results["ref_win_rate"], step=iteration)
+                    mlflow.log_metric("versus_draw_rate", eval_results["draw_rate"], step=iteration)
+                    mlflow.log_metric("versus_avg_plies", eval_results["avg_plies"], step=iteration)
+
+                    # temperature=0.0 での対局 (2ゲーム)
+                    print(f"\n[Iteration {iteration}] Running versus evaluation against pretrained model (2 games, temperature=0.0)...")
+                    eval_results_temp0 = self.evaluate_versus(num_games=2, temperature=0.0)
+                    print(f"  Policy Win Rate (temp=0.0): {eval_results_temp0['policy_win_rate']:.1f}%")
+                    print(f"  Reference Win Rate (temp=0.0): {eval_results_temp0['ref_win_rate']:.1f}%")
+                    print(f"  Draw Rate (temp=0.0): {eval_results_temp0['draw_rate']:.1f}%")
+                    print(f"  Average Game Length (temp=0.0): {eval_results_temp0['avg_plies']:.1f} plies")
+                    
+                    # MLflow に記録
+                    mlflow.log_metric("versus_policy_win_rate_temp0", eval_results_temp0["policy_win_rate"], step=iteration)
+                    mlflow.log_metric("versus_ref_win_rate_temp0", eval_results_temp0["ref_win_rate"], step=iteration)
+                    mlflow.log_metric("versus_draw_rate_temp0", eval_results_temp0["draw_rate"], step=iteration)
+                    mlflow.log_metric("versus_avg_plies_temp0", eval_results_temp0["avg_plies"], step=iteration)
+
+    def evaluate_versus(self, num_games=10, temperature=1.0) -> dict:
+        """現在のポリシーと事前学習済み（Reference）モデルとの対局シミュレーションを行い、勝率を測定します"""
+        self.agent.policy.eval()
+        self.agent.ref.eval()
+        
+        stats = {
+            "policy_wins": 0,
+            "ref_wins": 0,
+            "draws": 0,
+            "total_plies": 0,
+        }
+        
+        device = self.agent.device
+        tokenizer = self.agent.tokenizer
+        
+        for game_idx in range(1, num_games + 1):
+            is_policy_black = (game_idx % 2 == 1)
+            board = [0] * 225
+            winner = None
+            plies = 0
+            
+            for ply in range(1, 226):
+                current_player = infer_player(board)
+                current_is_policy = (current_player == 1) if is_policy_black else (current_player == 2)
+                current_model = self.agent.policy if current_is_policy else self.agent.ref
+                
+                legal_mask = tokenizer.legal_move_mask(board).to(device)
+                if not legal_mask.any():
+                    break
+                    
+                input_ids = tokenizer.encode_input(board).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    logits = current_model(input_ids).squeeze(0)
+                    masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
+                    
+                    if temperature == 0.0:
+                        move_idx = masked_logits.argmax().item()
+                    else:
+                        probs = torch.softmax(masked_logits / temperature, dim=-1)
+                        dist = Categorical(probs=probs)
+                        move_idx = dist.sample().item()
+                
+                board[move_idx] = current_player
+                plies += 1
+                
+                winner = winner_after_move(board, move_idx, current_player)
+                if winner is not None:
+                    break
+            
+            stats["total_plies"] += plies
+            if winner is None:
+                stats["draws"] += 1
+            else:
+                winner_is_policy = (winner == 1) if is_policy_black else (winner == 2)
+                if winner_is_policy:
+                    stats["policy_wins"] += 1
+                else:
+                    stats["ref_wins"] += 1
+                    
+        policy_win_rate = (stats["policy_wins"] / num_games) * 100.0
+        ref_win_rate = (stats["ref_wins"] / num_games) * 100.0
+        draw_rate = (stats["draws"] / num_games) * 100.0
+        
+        # Reset policy model to train mode
+        self.agent.policy.train()
+        
+        return {
+            "policy_win_rate": policy_win_rate,
+            "ref_win_rate": ref_win_rate,
+            "draw_rate": draw_rate,
+            "avg_plies": stats["total_plies"] / num_games
+        }

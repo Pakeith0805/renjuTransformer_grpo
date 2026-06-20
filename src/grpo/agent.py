@@ -231,7 +231,7 @@ def run_mcts_eval_with_policy_and_visits(board: list[int], simulations: int, see
 def reconstruct_winning_states(start_board: list[int], path: list[int], win_player: int) -> list[list[int]]:
     states = []
     curr_board = start_board.copy()
-    curr_player = win_player
+    curr_player = infer_player(curr_board)
     for move in path:
         if curr_player == win_player:
             states.append(curr_board.copy())
@@ -259,7 +259,7 @@ class GRPOAgent:
             print(f"Warning: Failed to pre-load MCTS DLL: {e}", file=sys.stderr)
 
     def get_group_actions(self, board_state, group_size=8, temperature=1.0):
-        """盤面から G 個のアクションと、Policy/Ref それぞれ of 対数確率を計算して返す"""
+        """盤面から G 個のアクションと、Policy/Ref それぞれ of 対数確率、および正確なKLダイバージェンスを計算して返す"""
         input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
         legal_mask = self.tokenizer.legal_move_mask(board_state).to(self.device)
 
@@ -278,7 +278,15 @@ class GRPOAgent:
             ref_dist = Categorical(probs=ref_probs)
             log_probs_ref = ref_dist.log_prob(sample_actions)
 
-        return sample_actions, log_probs_policy, log_probs_ref
+        # 盤面全体（全225手）の正確なKLダイバージェンスを計算
+        with torch.no_grad():
+            policy_log_probs = torch.log_softmax(masked_policy_logits / temperature, dim=-1)
+            ref_log_probs = torch.log_softmax(masked_ref_logits / temperature, dim=-1)
+            kl_elementwise = policy_probs * (policy_log_probs - ref_log_probs)
+            kl_elementwise = torch.nan_to_num(kl_elementwise, nan=0.0, posinf=0.0, neginf=0.0)
+            exact_kl = kl_elementwise.sum().item()
+
+        return sample_actions, log_probs_policy, log_probs_ref, exact_kl
     
     def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0) -> tuple[float, list[int]]:
         """互換性のための直列版（実際には rollout_group を推奨）"""
