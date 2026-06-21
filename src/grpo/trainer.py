@@ -65,10 +65,12 @@ class GRPOTrainer:
 
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
-        actions, log_probs_policy, log_probs_ref, exact_kl = self.agent.get_group_actions(
+        vcf_target_prob = self.cfg.grpo.get("vcf_target_prob", 0.4)
+        actions, log_probs_policy, log_probs_old, log_probs_ref, exact_kl, p_raw_val = self.agent.get_group_actions(
             board_state, 
             group_size=8, 
-            temperature=self.cfg.grpo.temperature
+            temperature=self.cfg.grpo.temperature,
+            vcf_target_prob=vcf_target_prob
         )
 
         # 報酬を回収 (並列 MCTS 評価)
@@ -85,8 +87,6 @@ class GRPOTrainer:
         advantages = compute_group_advantages(rewards)
 
         advantages = advantages.to(self.agent.device)
-
-        log_probs_old = log_probs_policy.detach()
 
         total_loss, policy_loss, kl_loss = self.compute_grpo_loss(
             log_probs_policy=log_probs_policy,  # 勾配あり (Policyモデルを更新するため)
@@ -152,7 +152,8 @@ class GRPOTrainer:
             "avg_vcf_path_length": avg_vcf_path_length,
             "new_vcf_injections": new_vcf_injections,
             "black_reward": black_reward,
-            "white_reward": white_reward
+            "white_reward": white_reward,
+            "vcf_p_raw": p_raw_val
         }
     
     def collect_trajectory_boards(self) -> list[list[int]]:
@@ -294,6 +295,9 @@ class GRPOTrainer:
                     avg_black_reward = sum(black_rewards) / len(black_rewards) if black_rewards else None
                     avg_white_reward = sum(white_rewards) / len(white_rewards) if white_rewards else None
 
+                    vcf_p_raw_list = [m["vcf_p_raw"] for m in step_metrics_list if m["vcf_p_raw"] is not None]
+                    avg_vcf_p_raw = sum(vcf_p_raw_list) / len(vcf_p_raw_list) if vcf_p_raw_list else None
+
                     metrics = {
                         "loss": avg_loss,
                         "policy_loss": avg_policy_loss,
@@ -307,6 +311,7 @@ class GRPOTrainer:
                         "new_vcf_injections": sum_new_vcf_injections,
                         "black_reward": avg_black_reward,
                         "white_reward": avg_white_reward,
+                        "vcf_p_raw": avg_vcf_p_raw,
                         "final_board": step_metrics_list[-1]["final_board"]
                     }
                 else:
@@ -360,13 +365,17 @@ class GRPOTrainer:
                     mlflow.log_metric("grpo_black_reward", metrics["black_reward"], step=iteration)
                 if metrics["white_reward"] is not None:
                     mlflow.log_metric("grpo_white_reward", metrics["white_reward"], step=iteration)
+                if "vcf_p_raw" in metrics and metrics["vcf_p_raw"] is not None:
+                    mlflow.log_metric("grpo_vcf_p_raw", metrics["vcf_p_raw"], step=iteration)
                 
                 # 画面の進捗バーの表示を更新
+                vcf_p_raw_val = metrics.get("vcf_p_raw")
                 progress.set_postfix(
                     loss=f"{metrics['loss']:.4f}",
                     kl=f"{metrics['kl_loss']:.4f}",
                     reward=f"{metrics['mean_reward']:+.2f}",
-                    vcf=metrics["vcf_win_count"]
+                    vcf=metrics["vcf_win_count"],
+                    p_raw=f"{vcf_p_raw_val:.3f}" if vcf_p_raw_val is not None else "N/A"
                 )
                 
                 # 1イテレーション（エポック）終了ごとに、自己対戦の最終盤面を表示

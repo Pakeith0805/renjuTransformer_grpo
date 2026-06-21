@@ -287,8 +287,9 @@ class GRPOAgent:
         except Exception as e:
             print(f"Warning: Failed to pre-load MCTS DLL: {e}", file=sys.stderr)
 
-    def get_group_actions(self, board_state, group_size=8, temperature=1.0):
+    def get_group_actions(self, board_state, group_size=8, temperature=1.0, vcf_target_prob=0.4):
         """盤面から G 個のアクションと、Policy/Ref それぞれ of 対数確率、および正確なKLダイバージェンスを計算して返す"""
+        import math
         input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
         legal_mask = self.tokenizer.legal_move_mask(board_state).to(self.device)
 
@@ -296,10 +297,11 @@ class GRPOAgent:
         masked_policy_logits = policy_logits.masked_fill(~legal_mask, float("-inf"))
 
         policy_probs = torch.softmax(masked_policy_logits / temperature, dim=-1)
-        policy_dist = Categorical(probs = policy_probs)
-        sample_actions = policy_dist.sample((group_size, ))
-
-        # VCF/TSS force-injection
+        
+        # VCF/TSS dynamic bias sampling
+        biased_probs = None
+        p_raw_val = None
+        
         if self.use_tss_training:
             try:
                 lib = _get_mcts_lib()
@@ -314,11 +316,36 @@ class GRPOAgent:
                     vcf_move = lib.solve_vcf_c_api(board_array, opponent, 12)
                     
                 if vcf_move >= 0:
-                    sample_actions[0] = torch.tensor(vcf_move, dtype=torch.long, device=self.device)
+                    # Ensure the VCF move is marked as legal in our mask
+                    if legal_mask[vcf_move]:
+                        p_raw = policy_probs[vcf_move].item()
+                        p_raw_val = p_raw
+                        p_raw_clamped = max(1e-6, min(1.0 - 1e-6, p_raw))
+                        
+                        if p_raw_clamped < vcf_target_prob:
+                            # Compute exact logit bias B to raise VCF probability to vcf_target_prob
+                            bias = math.log(vcf_target_prob / (1.0 - vcf_target_prob)) - math.log(p_raw_clamped / (1.0 - p_raw_clamped))
+                            
+                            # Apply logit bias (scaled by temperature to match the softmax scaling)
+                            biased_policy_logits = masked_policy_logits.clone()
+                            biased_policy_logits[vcf_move] += bias * temperature
+                            biased_probs = torch.softmax(biased_policy_logits / temperature, dim=-1)
             except Exception as e:
-                print(f"Warning: VCF injection failed in get_group_actions: {e}", file=sys.stderr)
+                print(f"Warning: VCF dynamic bias failed in get_group_actions: {e}", file=sys.stderr)
 
+        # Sampling Actions: from biased_probs if exists, otherwise raw policy_probs
+        sampling_probs = biased_probs if biased_probs is not None else policy_probs
+        behavior_dist = Categorical(probs=sampling_probs)
+        sample_actions = behavior_dist.sample((group_size,))
+
+        # log_probs_policy (with gradient, unbiased): evaluate under original policy distribution
+        policy_dist = Categorical(probs=policy_probs)
         log_probs_policy = policy_dist.log_prob(sample_actions)
+        
+        # log_probs_old (detached, biased): evaluate under sampling behavior distribution
+        log_probs_old = behavior_dist.log_prob(sample_actions).detach()
+
+        # log_probs_ref (detached, unbiased): evaluate under reference distribution
         with torch.no_grad():
             ref_logits = self.ref(input_ids).squeeze(0)
             masked_ref_logits = ref_logits.masked_fill(~legal_mask, float("-inf"))
@@ -326,7 +353,7 @@ class GRPOAgent:
             ref_dist = Categorical(probs=ref_probs)
             log_probs_ref = ref_dist.log_prob(sample_actions)
 
-        # 盤面全体（全225手）の正確なKLダイバージェンスを計算
+        # 盤面全体（全225手）の正確なKLダイバージェンスを計算 (生の policy vs 生の reference)
         with torch.no_grad():
             policy_log_probs = torch.log_softmax(masked_policy_logits / temperature, dim=-1)
             ref_log_probs = torch.log_softmax(masked_ref_logits / temperature, dim=-1)
@@ -334,7 +361,7 @@ class GRPOAgent:
             kl_elementwise = torch.nan_to_num(kl_elementwise, nan=0.0, posinf=0.0, neginf=0.0)
             exact_kl = kl_elementwise.sum().item()
 
-        return sample_actions, log_probs_policy, log_probs_ref, exact_kl
+        return sample_actions, log_probs_policy, log_probs_old, log_probs_ref, exact_kl, p_raw_val
     
     def rollout_single_game(self, initial_board_state, first_move_idx, max_plies = 225, temperature = 1.0,
                             use_length_penalty: bool = False, length_penalty_coef: float = 0.02) -> tuple[float, list[int]]:
@@ -363,15 +390,24 @@ class GRPOAgent:
 
     def rollout_group(self, initial_board_state, move_indices,
                       use_length_penalty: bool = False, length_penalty_coef: float = 0.02) -> tuple[list[float], list[int]]:
-        """指定された複数の着手を並列でMCTS評価し、報酬リストを返します"""
-        rewards = [0.0] * len(move_indices)
+        """指定された複数の着手を並列でMCTS評価し、報酬リストを返します (重複排除版)"""
+        # move_indices の中からユニークな指し手を特定
+        # 順序を保持するために dictionary を使用（Python 3.7+ では順序保存）
+        unique_move_to_indices = {}
+        for i, move_idx in enumerate(move_indices):
+            if move_idx not in unique_move_to_indices:
+                unique_move_to_indices[move_idx] = []
+            unique_move_to_indices[move_idx].append(i)
+            
+        unique_moves = list(unique_move_to_indices.keys())
+        num_unique = len(unique_moves)
         
-        # 1. 各手を打った後の盤面を作成し、そこでの次のプレイヤーの手に対するポリシー事前確率を一括バッチ推論する
+        # 1. 各ユニークな手を打った後の盤面を作成し、そこでの次のプレイヤーの手に対するポリシー事前確率を一括バッチ推論する
         player = infer_player(initial_board_state)
         batch_input_ids = []
         batch_legal_masks = []
         
-        for move_idx in move_indices:
+        for move_idx in unique_moves:
             next_board = board_with_move(initial_board_state, move_idx, player)
             input_ids = self.tokenizer.encode_input(next_board)
             batch_input_ids.append(input_ids)
@@ -382,14 +418,16 @@ class GRPOAgent:
             input_ids_tensor = torch.stack(batch_input_ids).to(self.device)
             legal_masks_tensor = torch.stack(batch_legal_masks).to(self.device)
             with torch.no_grad():
-                logits = self.policy(input_ids_tensor) # (batch_size, 225)
+                logits = self.policy(input_ids_tensor) # (num_unique, 225)
                 masked_logits = logits.masked_fill(~legal_masks_tensor, float("-inf"))
                 probs_tensor = torch.softmax(masked_logits, dim=-1)
                 batch_probs = probs_tensor.cpu().numpy().tolist()
         else:
             batch_probs = []
+            
+        unique_rewards = [0.0] * num_unique
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(move_indices)) as executor: # 並列処理のためのクラス
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_unique) as executor:
             futures = {
                 executor.submit(
                     run_mcts_eval_with_policy, 
@@ -397,24 +435,30 @@ class GRPOAgent:
                     move_idx, 
                     batch_probs[i],
                     self.mcts_simulations,
-                    seed=42 + i * 997, # MCTsが同じ挙動をしないようにシードを散らす
+                    seed=42 + i * 997, # MCTSの挙動が重ならないようシードをずらす
                     use_tss=self.use_tss_training,
                     use_puct=self.use_puct_training,
                     use_length_penalty=use_length_penalty,
                     length_penalty_coef=length_penalty_coef
                 ): i
-                for i, move_idx in enumerate(move_indices)
+                for i, move_idx in enumerate(unique_moves)
             }
             
-            # 処理が終わった順に報酬(勝率)を回収。
             for future in concurrent.futures.as_completed(futures):
                 idx = futures[future]
                 try:
                     win_rate = future.result()
-                    rewards[idx] = 2.0 * win_rate - 1.0
+                    unique_rewards[idx] = 2.0 * win_rate - 1.0
                 except Exception as e:
-                    rewards[idx] = 0.0  # Draw on failure
+                    unique_rewards[idx] = 0.0  # Draw on failure
                     
+        # 2. ユニークな手の報酬を元のインデックスへマッピング
+        rewards = [0.0] * len(move_indices)
+        for i, move_idx in enumerate(unique_moves):
+            reward = unique_rewards[i]
+            for orig_idx in unique_move_to_indices[move_idx]:
+                rewards[orig_idx] = reward
+                
         # 描画用の盤面として、最初の着手を行った盤面を返す
         last_board = initial_board_state.copy()
         if len(move_indices) > 0:
