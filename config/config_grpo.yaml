@@ -28,3 +28,5 @@ grpo:
   use_puct_training: false     # GRPO training rollout PUCT flag (false = UCB1)
   use_length_penalty: false    # 決着までの手数に応じたペナルティの適用フラグ
   length_penalty_coef: 0.02    # ペナルティ係数 (手数ごとに引く値)
+  use_full_game_training: false  # 1戦通して盤面を収集し、全盤面を1回ずつ学習するモード
+  collection_simulations: 1000   # trajectory収集時のMCTSシミュレーション回数

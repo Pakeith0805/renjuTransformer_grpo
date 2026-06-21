@@ -180,7 +180,8 @@ class GRPOTrainer:
 
             # 序盤（最初の10手まで）は T=1.0、それ以降は T=0.1 で探索
             temp = 1.0 if len(boards) <= 10 else 0.1
-            move_idx = self.agent.select_move_via_mcts(board, simulations=1000, temperature=temp, use_noise=True)
+            collection_sims = self.cfg.grpo.get("collection_simulations", 1000)
+            move_idx = self.agent.select_move_via_mcts(board, simulations=collection_sims, temperature=temp, use_noise=True)
 
             board[move_idx] = current_player
 
@@ -258,39 +259,89 @@ class GRPOTrainer:
             
             progress = tqdm(range(start_iteration, start_iteration + num_iterations), desc="GRPO Iterations")
             for iteration in progress:
-                start_board = initial_board
- 
-                if not trajectory_boards or random.random() > sample_prob:
+                if self.cfg.grpo.get("use_full_game_training", False):
+                    # 1戦通して盤面を収集し、全盤面を1回ずつ学習するモード
+                    game_boards = self.collect_trajectory_boards()
+                    if not game_boards:
+                        game_boards = [initial_board.copy()]
+
+                    step_metrics_list = []
+                    for board_state in game_boards:
+                        step_metrics = self.train_step(
+                            board_state,
+                            beta=self.cfg.grpo.beta,
+                            clip_eps=self.cfg.grpo.clip_eps
+                        )
+                        step_metrics_list.append(step_metrics)
+
+                    total_steps = len(step_metrics_list)
+                    avg_loss = sum(m["loss"] for m in step_metrics_list) / total_steps
+                    avg_policy_loss = sum(m["policy_loss"] for m in step_metrics_list) / total_steps
+                    avg_kl_loss = sum(m["kl_loss"] for m in step_metrics_list) / total_steps
+                    avg_exact_kl = sum(m["exact_kl"] for m in step_metrics_list) / total_steps
+                    avg_mean_reward = sum(m["mean_reward"] for m in step_metrics_list) / total_steps
+                    avg_std_reward = sum(m["std_reward"] for m in step_metrics_list) / total_steps
+                    avg_grad_norm = sum(m["grad_norm"] for m in step_metrics_list) / total_steps
+                    sum_vcf_win_count = sum(m["vcf_win_count"] for m in step_metrics_list)
+                    sum_new_vcf_injections = sum(m["new_vcf_injections"] for m in step_metrics_list)
+
+                    vcf_steps_lengths = [m["avg_vcf_path_length"] for m in step_metrics_list if m["vcf_win_count"] > 0]
+                    avg_vcf_path_length = sum(vcf_steps_lengths) / len(vcf_steps_lengths) if vcf_steps_lengths else 0.0
+
+                    black_rewards = [m["black_reward"] for m in step_metrics_list if m["black_reward"] is not None]
+                    white_rewards = [m["white_reward"] for m in step_metrics_list if m["white_reward"] is not None]
+                    avg_black_reward = sum(black_rewards) / len(black_rewards) if black_rewards else None
+                    avg_white_reward = sum(white_rewards) / len(white_rewards) if white_rewards else None
+
+                    metrics = {
+                        "loss": avg_loss,
+                        "policy_loss": avg_policy_loss,
+                        "kl_loss": avg_kl_loss,
+                        "exact_kl": avg_exact_kl,
+                        "mean_reward": avg_mean_reward,
+                        "std_reward": avg_std_reward,
+                        "grad_norm": avg_grad_norm,
+                        "vcf_win_count": sum_vcf_win_count,
+                        "avg_vcf_path_length": avg_vcf_path_length,
+                        "new_vcf_injections": sum_new_vcf_injections,
+                        "black_reward": avg_black_reward,
+                        "white_reward": avg_white_reward,
+                        "final_board": step_metrics_list[-1]["final_board"]
+                    }
+                else:
                     start_board = initial_board
  
-                if iteration % 100 == 0 or not trajectory_boards:
-                    new_boards = self.collect_trajectory_boards()
-                    trajectory_boards.extend(new_boards)
+                    if not trajectory_boards or random.random() > sample_prob:
+                        start_board = initial_board
  
-                    if len(trajectory_boards) > 1000:
-                        trajectory_boards = trajectory_boards[-1000:]
-                else:
-                    # 盤面をランダムに選ぶ
-                    start_board = random.choice(trajectory_boards)
-
-                # 選ばれた局面から1訓練
-                # 初期盤面から 8 通り試して Policy を更新 (1回の学習ステップ)
-                metrics = self.train_step(
-                    start_board, 
-                    beta=self.cfg.grpo.beta, 
-                    clip_eps=self.cfg.grpo.clip_eps
-                )
-                
-                # Check for new VCF boards and add them to trajectory pool
-                if "new_trajectory_boards" in metrics and metrics["new_trajectory_boards"]:
-                    valid_new_boards = [
-                        b for b in metrics["new_trajectory_boards"]
-                        if self.agent.tokenizer.legal_move_mask(b).any()
-                    ]
-                    if valid_new_boards:
-                        trajectory_boards.extend(valid_new_boards)
+                    if iteration % 100 == 0 or not trajectory_boards:
+                        new_boards = self.collect_trajectory_boards()
+                        trajectory_boards.extend(new_boards)
+ 
                         if len(trajectory_boards) > 1000:
                             trajectory_boards = trajectory_boards[-1000:]
+                    else:
+                        # 盤面をランダムに選ぶ
+                        start_board = random.choice(trajectory_boards)
+
+                    # 選ばれた局面から1訓練
+                    # 初期盤面から 8 通り試して Policy を更新 (1回の学習ステップ)
+                    metrics = self.train_step(
+                        start_board, 
+                        beta=self.cfg.grpo.beta, 
+                        clip_eps=self.cfg.grpo.clip_eps
+                    )
+                    
+                    # Check for new VCF boards and add them to trajectory pool
+                    if "new_trajectory_boards" in metrics and metrics["new_trajectory_boards"]:
+                        valid_new_boards = [
+                            b for b in metrics["new_trajectory_boards"]
+                            if self.agent.tokenizer.legal_move_mask(b).any()
+                        ]
+                        if valid_new_boards:
+                            trajectory_boards.extend(valid_new_boards)
+                            if len(trajectory_boards) > 1000:
+                                trajectory_boards = trajectory_boards[-1000:]
                 
                 # メトリクスを MLflow に記録
                 mlflow.log_metric("grpo_loss", metrics["loss"], step=iteration)
