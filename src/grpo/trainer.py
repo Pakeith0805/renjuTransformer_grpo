@@ -160,8 +160,9 @@ class GRPOTrainer:
         board[112] = 1  # 1手目は天元に固定。ルールだから
         boards = [board.copy()]
 
-        # 2手目以降、ゲーム終了まで打つ
-        for ply in range(2, 226):
+        max_plies = self.cfg.grpo.get("max_plies", 80)
+        # 2手目以降、ゲーム終了または最大手数まで打つ
+        for ply in range(2, max_plies + 1):
             current_player = infer_player(board)
             legal_mask = self.agent.tokenizer.legal_move_mask(board).to(self.agent.device)
             if not legal_mask.any():

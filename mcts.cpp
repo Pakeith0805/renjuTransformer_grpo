@@ -205,33 +205,46 @@ int board_winner(const Board& board) {
     return NO_WINNER;
 }
 
+// 固定長のスタック割当用構造体 (ヒープ割り当てを避けるため)
+struct LinePoints {
+    int points[16];
+    int size = 0;
+};
+
 // 指定したマスを通り、特定の方向に延びる直線状の全マスのインデックスを端から端まで集めてリストにする
-std::vector<int> line_points_through(int index, int dr, int dc) {
+LinePoints line_points_through(int index, int dr, int dc) {
     auto [row, col] = idx_to_rc(index);
     while (inside(row - dr, col - dc)) {
         row -= dr;
         col -= dc;
     }
 
-    std::vector<int> points;
+    LinePoints lp;
     while (inside(row, col)) {
-        points.push_back(rc_to_idx(row, col));
+        if (lp.size < 16) {
+            lp.points[lp.size++] = rc_to_idx(row, col);
+        }
         row += dr;
         col += dc;
     }
-    return points;
+    return lp;
 }
 
+struct WinPoints {
+    int points[16];
+    int size = 0;
+};
+
 // 指定した直線状に、そこにおけば即勝利になる空きマスがあるか探して、そのリストを返す
-std::vector<int> immediate_wins_in_direction(
+WinPoints immediate_wins_in_direction(
     const Board& board,
     int player,
-    const std::vector<int>& line_points
+    const LinePoints& line_points
 ) {
-    std::vector<int> wins;
-    wins.reserve(line_points.size());
+    WinPoints wins;
 
-    for (int candidate : line_points) {
+    for (int i = 0; i < line_points.size; ++i) {
+        int candidate = line_points.points[i];
         if (board[static_cast<std::size_t>(candidate)] != EMPTY) {
             continue;
         }
@@ -240,10 +253,11 @@ std::vector<int> immediate_wins_in_direction(
             continue;
         }
         if (has_five_or_more(next_board, candidate, player)) {
-            wins.push_back(candidate);
+            if (wins.size < 16) {
+                wins.points[wins.size++] = candidate;
+            }
         }
     }
-
     return wins;
 }
 
@@ -251,8 +265,9 @@ std::vector<int> immediate_wins_in_direction(
 int count_four_directions(const Board& board, int move, int player) {
     int count = 0;
     for (const auto& [dr, dc] : DIRECTIONS) {
-        const std::vector<int> line_points = line_points_through(move, dr, dc);
-        if (!immediate_wins_in_direction(board, player, line_points).empty()) {
+        const LinePoints line_points = line_points_through(move, dr, dc);
+        const WinPoints wins = immediate_wins_in_direction(board, player, line_points);
+        if (wins.size > 0) {
             ++count;
         }
     }
@@ -263,9 +278,10 @@ int count_four_directions(const Board& board, int move, int player) {
 int count_open_three_directions(const Board& board, int move, int player) {
     int count = 0;
     for (const auto& [dr, dc] : DIRECTIONS) {
-        const std::vector<int> line_points = line_points_through(move, dr, dc);
+        const LinePoints line_points = line_points_through(move, dr, dc);
         bool found_open_three = false;
-        for (int candidate : line_points) {
+        for (int i = 0; i < line_points.size; ++i) {
+            int candidate = line_points.points[i];
             if (board[static_cast<std::size_t>(candidate)] != EMPTY) {
                 continue;
             }
@@ -273,9 +289,9 @@ int count_open_three_directions(const Board& board, int move, int player) {
             if (player == BLACK && is_overline(next_board, candidate, BLACK)) {
                 continue;
             }
-            const std::vector<int> winning_points =
+            const WinPoints winning_points =
                 immediate_wins_in_direction(next_board, player, line_points);
-            if (winning_points.size() >= 2) {
+            if (winning_points.size >= 2) {
                 found_open_three = true;
                 break;
             }
@@ -1243,8 +1259,9 @@ bool creates_four_threat(const Board& board, int move, int player) {
 
     Board next_board = board_with_move(board, move, player);
     for (const auto& [dr, dc] : DIRECTIONS) {
-        const std::vector<int> line_points = line_points_through(move, dr, dc);
-        for (int next_move : line_points) {
+        const LinePoints line_points = line_points_through(move, dr, dc);
+        for (int i = 0; i < line_points.size; ++i) {
+            int next_move = line_points.points[i];
             if (is_winning_move(next_board, next_move, player)) {
                 return true;
             }

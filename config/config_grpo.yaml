@@ -13,9 +13,9 @@ seed: 42
 
 # GRPO 固有の設定グループ
 grpo:
-  checkpoint_path: artifacts/checkpoints/best_model.pt
+  checkpoint_path: models/pretrained.pt
   ref_checkpoint_path: models/pretrained.pt
-  group_size: 8         # 1局面あたりにサンプリングする手の数 (G)
+  group_size: 16         # 1局面あたりにサンプリングする手の数 (G)
   beta: 0.04            # KLペナルティの強さの係数
   clip_eps: 0.2 
   temperature: 1.0      # サンプリング時の温度
@@ -31,3 +31,4 @@ grpo:
   use_full_game_training: false  # 1戦通して盤面を収集し、全盤面を1回ずつ学習するモード
   collection_simulations: 1000   # trajectory収集時のMCTSシミュレーション回数
   save_every: null               # チェックポイント保存の間隔 (nullの場合はモードに応じて自動設定)
+  max_plies: 80                  # 自己対戦データ収集時の最大手数制限
