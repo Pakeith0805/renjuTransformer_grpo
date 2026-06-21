@@ -1,0 +1,24 @@
+# config/config_eval_mcts.yaml
+defaults:
+  - data: default
+  - model: transformer
+  - train: default
+  - _self_
+
+mode: eval_mcts
+seed: 42
+
+eval_mcts:
+  model_path: ???                 # Target model checkpoint to evaluate (e.g. artifacts/grpo_checkpoint_100.pt)
+  ref_model_path: models/pretrained.pt  # Reference model used as MCTS prior (can be set to "uniform" for no model prior)
+  num_games: 10                   # Must be an even number
+  device: auto
+  
+  # Target model configuration (Raw Policy)
+  model_temperature: 0.0          # Target model temperature during play (0.0 for argmax)
+  
+  # MCTS Opponent configuration
+  mcts_simulations: 200           # MCTS simulations count for the opponent
+  use_tss: true                   # Enable VCF check for MCTS opponent
+  use_puct: true                  # Use PUCT instead of UCB1 for MCTS opponent
+  mcts_temperature: 0.1           # MCTS opponent temperature
