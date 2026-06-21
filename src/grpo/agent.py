@@ -299,6 +299,25 @@ class GRPOAgent:
         policy_dist = Categorical(probs = policy_probs)
         sample_actions = policy_dist.sample((group_size, ))
 
+        # VCF/TSS force-injection
+        if self.use_tss_training:
+            try:
+                lib = _get_mcts_lib()
+                current_player = infer_player(board_state)
+                opponent = 2 if current_player == 1 else 1
+                board_array = (ctypes.c_int * 225)(*board_state)
+                
+                # Check self VCF win
+                vcf_move = lib.solve_vcf_c_api(board_array, current_player, 12)  # max_vcf_depth = 12
+                if vcf_move < 0:
+                    # Check opponent VCF win (block)
+                    vcf_move = lib.solve_vcf_c_api(board_array, opponent, 12)
+                    
+                if vcf_move >= 0:
+                    sample_actions[0] = torch.tensor(vcf_move, dtype=torch.long, device=self.device)
+            except Exception as e:
+                print(f"Warning: VCF injection failed in get_group_actions: {e}", file=sys.stderr)
+
         log_probs_policy = policy_dist.log_prob(sample_actions)
         with torch.no_grad():
             ref_logits = self.ref(input_ids).squeeze(0)
