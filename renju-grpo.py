@@ -101,9 +101,14 @@ def main(cfg: DictConfig) -> None:
     
     # 8. 強化学習 (GRPO) のループをスタート！
     # (繰り返し回数は config_grpo.yaml で指定した epochs 数になります)
+    save_every = cfg.grpo.get("save_every", None)
+    if save_every is None:
+        save_every = 1 if cfg.grpo.get("use_full_game_training", False) else 50
+    print(f"Checkpoint saving frequency: every {save_every} iteration(s)")
+
     trainer.train(
         num_iterations=cfg.grpo.epochs,
-        save_every=50,
+        save_every=save_every,
         run_id=cfg.mlflow.get("run_id", None),
         start_iteration=start_iteration
     )
