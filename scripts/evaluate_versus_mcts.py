@@ -121,8 +121,93 @@ def select_move_via_mcts_standalone(
         probs = power_counts / power_counts.sum()
         return random.choices(moves, weights=probs, k=1)[0]
 
+def play_single_game(
+    game_idx: int,
+    num_games: int,
+    is_model_black: bool,
+    model: RenjuTransformerModel,
+    ref_model: RenjuTransformerModel | None,
+    tokenizer: RenjuTokenizer,
+    device: torch.device,
+    model_temp: float,
+    mcts_sims: int,
+    use_tss: bool,
+    use_puct: bool,
+    mcts_temp: float
+) -> dict:
+    black_name = "Target Model" if is_model_black else "MCTS Opponent"
+    white_name = "MCTS Opponent" if is_model_black else "Target Model"
+    print(f"Game {game_idx}/{num_games} started: [Black] {black_name} vs [White] {white_name}")
+    
+    board = [0] * 225
+    winner = None
+    plies = 0
+    
+    for ply in range(1, 226):
+        current_player = infer_player(board)
+        current_is_model = (current_player == 1) if is_model_black else (current_player == 2)
+        
+        legal_mask = tokenizer.legal_move_mask(board).to(device)
+        if not legal_mask.any():
+            break
+            
+        if current_is_model:
+            # Target model move selection (Raw Policy)
+            input_ids = tokenizer.encode_input(board).unsqueeze(0).to(device)
+            with torch.no_grad():
+                logits = model(input_ids).squeeze(0)
+                masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
+                if model_temp == 0.0:
+                    move_idx = masked_logits.argmax().item()
+                else:
+                    probs = torch.softmax(masked_logits / model_temp, dim=-1)
+                    dist = torch.distributions.Categorical(probs=probs)
+                    move_idx = dist.sample().item()
+        else:
+            # MCTS opponent move selection
+            move_idx = select_move_via_mcts_standalone(
+                board_state=board,
+                policy_model=ref_model,
+                simulations=mcts_sims,
+                use_tss=use_tss,
+                use_puct=use_puct,
+                tokenizer=tokenizer,
+                device=device,
+                temperature=mcts_temp
+            )
+            
+        board[move_idx] = current_player
+        plies += 1
+        
+        winner = winner_after_move(board, move_idx, current_player)
+        if winner is not None:
+            break
+            
+    # Result reporting
+    result_str = ""
+    winner_is_model = None
+    if winner is None:
+        result_str = f"  Game {game_idx}/{num_games} finished: Draw in {plies} plies"
+    else:
+        winner_is_model = (winner == 1) if is_model_black else (winner == 2)
+        if winner_is_model:
+            result_str = f"  Game {game_idx}/{num_games} finished: Target Model won in {plies} plies ({'Black' if is_model_black else 'White'})"
+        else:
+            result_str = f"  Game {game_idx}/{num_games} finished: MCTS Opponent won in {plies} plies ({'White' if is_model_black else 'Black'})"
+            
+    print(result_str)
+    
+    return {
+        "plies": plies,
+        "winner": winner,
+        "winner_is_model": winner_is_model,
+        "is_model_black": is_model_black,
+        "board": board
+    }
+
 @hydra.main(version_base="1.3", config_path="../config", config_name="config_eval_mcts")
 def main(cfg: DictConfig) -> None:
+    import concurrent.futures
     set_seed(cfg.seed)
     device = select_device(cfg.eval_mcts.device)
     
@@ -150,7 +235,7 @@ def main(cfg: DictConfig) -> None:
     use_puct = cfg.eval_mcts.use_puct
     mcts_temp = cfg.eval_mcts.mcts_temperature
     
-    print(f"\nStarting {num_games} matches evaluation against MCTS Opponent...")
+    print(f"\nStarting {num_games} matches evaluation against MCTS Opponent (8 threads)...")
     print(f"  Target Model Temp:      {model_temp}")
     print(f"  MCTS Simulations:       {mcts_sims}")
     print(f"  MCTS TSS (VCF Solver):  {use_tss}")
@@ -166,81 +251,55 @@ def main(cfg: DictConfig) -> None:
         "total_plies": 0,
     }
     
-    for game_idx in range(1, num_games + 1):
-        is_model_black = (game_idx % 2 == 1)
-        
-        black_name = "Target Model" if is_model_black else "MCTS Opponent"
-        white_name = "MCTS Opponent" if is_model_black else "Target Model"
-        print(f"Game {game_idx}/{num_games}: [Black] {black_name} vs [White] {white_name}")
-        
-        board = [0] * 225
-        winner = None
-        plies = 0
-        
-        for ply in range(1, 226):
-            current_player = infer_player(board)
-            current_is_model = (current_player == 1) if is_model_black else (current_player == 2)
+    last_board = None
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = []
+        for game_idx in range(1, num_games + 1):
+            is_model_black = (game_idx % 2 == 1)
+            future = executor.submit(
+                play_single_game,
+                game_idx=game_idx,
+                num_games=num_games,
+                is_model_black=is_model_black,
+                model=model,
+                ref_model=ref_model,
+                tokenizer=tokenizer,
+                device=device,
+                model_temp=model_temp,
+                mcts_sims=mcts_sims,
+                use_tss=use_tss,
+                use_puct=use_puct,
+                mcts_temp=mcts_temp
+            )
+            futures.append(future)
             
-            legal_mask = tokenizer.legal_move_mask(board).to(device)
-            if not legal_mask.any():
-                break
-                
-            if current_is_model:
-                # Target model move selection (Raw Policy)
-                input_ids = tokenizer.encode_input(board).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    logits = model(input_ids).squeeze(0)
-                    masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
-                    if model_temp == 0.0:
-                        move_idx = masked_logits.argmax().item()
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            stats["total_plies"] += res["plies"]
+            winner = res["winner"]
+            winner_is_model = res["winner_is_model"]
+            is_model_black = res["is_model_black"]
+            last_board = res["board"]
+            
+            if winner is None:
+                stats["draws"] += 1
+            else:
+                if winner_is_model:
+                    if is_model_black:
+                        stats["model_wins_black"] += 1
                     else:
-                        probs = torch.softmax(masked_logits / model_temp, dim=-1)
-                        dist = torch.distributions.Categorical(probs=probs)
-                        move_idx = dist.sample().item()
-            else:
-                # MCTS opponent move selection
-                move_idx = select_move_via_mcts_standalone(
-                    board_state=board,
-                    policy_model=ref_model,
-                    simulations=mcts_sims,
-                    use_tss=use_tss,
-                    use_puct=use_puct,
-                    tokenizer=tokenizer,
-                    device=device,
-                    temperature=mcts_temp
-                )
-                
-            board[move_idx] = current_player
-            plies += 1
-            
-            winner = winner_after_move(board, move_idx, current_player)
-            if winner is not None:
-                break
-                
-        stats["total_plies"] += plies
-        
-        if winner is None:
-            stats["draws"] += 1
-            print(f"  Result: Draw in {plies} plies")
-        else:
-            winner_is_model = (winner == 1) if is_model_black else (winner == 2)
-            if winner_is_model:
-                if is_model_black:
-                    stats["model_wins_black"] += 1
+                        stats["model_wins_white"] += 1
                 else:
-                    stats["model_wins_white"] += 1
-                print(f"  Result: Target Model won in {plies} plies ({'Black' if is_model_black else 'White'})")
-            else:
-                if is_model_black:
-                    stats["mcts_wins_white"] += 1
-                else:
-                    stats["mcts_wins_black"] += 1
-                print(f"  Result: MCTS Opponent won in {plies} plies ({'White' if is_model_black else 'Black'})")
-                
-        # Print the final board state of the last match
-        if game_idx == num_games:
-            print("\nFinal Game Board State:")
-            print_board(board)
+                    if is_model_black:
+                        stats["mcts_wins_white"] += 1
+                    else:
+                        stats["mcts_wins_black"] += 1
+                        
+    # Print the final board state of the last finished game
+    if last_board is not None:
+        print("\nFinal Game Board State:")
+        print_board(last_board)
             
     # Calculate stats
     model_wins = stats["model_wins_black"] + stats["model_wins_white"]
