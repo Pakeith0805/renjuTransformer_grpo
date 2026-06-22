@@ -93,6 +93,7 @@ class GRPOTrainer:
             log_probs_old=log_probs_old,        # 勾配なし (基準値)
             log_probs_ref=log_probs_ref,        # 勾配なし (Referenceモデル)
             advantages=advantages,
+            exact_kl=exact_kl,
             beta=beta,
             clip_eps=clip_eps
         )
@@ -203,23 +204,19 @@ class GRPOTrainer:
             log_probs_old: torch.Tensor,
             log_probs_ref: torch.Tensor,
             advantages: torch.Tensor,
+            exact_kl: float,
             beta: float = 0.04,
             clip_eps: float = 0.2
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # eの肩に対数を載せた
         ratios = torch.exp(log_probs_policy - log_probs_old)
 
         surr1 = ratios * advantages
         surr2 = torch.clamp(ratios, 1.0 - clip_eps , 1.0 + clip_eps) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        # 以下、klダイバージェンス
-        kl_ratio = torch.exp(log_probs_ref - log_probs_policy)
-        kl_diff = log_probs_ref - log_probs_policy
-        kl_div = kl_ratio - kl_diff - 1.0
-        kl_loss = kl_div.mean()
-
-        # 総損失
+        # exact_kl: 全合法手の分布全体で計算した正確な KL(policy || ref)
+        # per-sample 推定量は VCF injection 時に爆発するため使わない
+        kl_loss = torch.tensor(exact_kl, device=policy_loss.device)
         total_loss = policy_loss + beta * kl_loss
 
         return total_loss, policy_loss, kl_loss
