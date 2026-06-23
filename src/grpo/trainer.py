@@ -80,6 +80,8 @@ class GRPOTrainer:
 
         # 報酬を回収 (並列 MCTS 評価)
         move_indices = [actions[i].item() for i in range(len(actions))]
+        # サンプリングされた手のユニーク数 (advantage消滅の原因切り分け用)
+        n_unique_actions = len(set(move_indices))
         use_penalty = self.cfg.grpo.get("use_length_penalty", False)
         penalty_coef = self.cfg.grpo.get("length_penalty_coef", 0.02)
         rewards, last_final_board = self.agent.rollout_group(
@@ -160,6 +162,7 @@ class GRPOTrainer:
             "mean_reward": mean_reward,
             "std_reward": std_reward,
             "adv_collapsed": adv_collapsed,
+            "n_unique_actions": n_unique_actions,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm),
             "rewards": rewards,  # 個々の勝敗ログ
             "final_board": last_final_board,
@@ -298,6 +301,14 @@ class GRPOTrainer:
                     avg_std_reward = sum(m["std_reward"] for m in step_metrics_list) / total_steps
                     avg_grad_norm = sum(m["grad_norm"] for m in step_metrics_list) / total_steps
                     avg_adv_collapsed = sum(m["adv_collapsed"] for m in step_metrics_list) / total_steps
+                    # 全ステップ平均のユニーク手数 (ノイズが多様性を生んでいるかの確認)
+                    avg_unique_actions = sum(m["n_unique_actions"] for m in step_metrics_list) / total_steps
+                    # 消滅ステップに限ったユニーク手数 (原因A=少数 / 原因B=多数 の切り分け)
+                    collapsed_steps = [m for m in step_metrics_list if m["adv_collapsed"] == 1.0]
+                    unique_on_collapse = (
+                        sum(m["n_unique_actions"] for m in collapsed_steps) / len(collapsed_steps)
+                        if collapsed_steps else 0.0
+                    )
                     sum_vcf_win_count = sum(m["vcf_win_count"] for m in step_metrics_list)
                     sum_new_vcf_injections = sum(m["new_vcf_injections"] for m in step_metrics_list)
 
@@ -321,6 +332,9 @@ class GRPOTrainer:
                         "std_reward": avg_std_reward,
                         "grad_norm": avg_grad_norm,
                         "adv_collapse_rate": avg_adv_collapsed,
+                        "mean_unique_actions": avg_unique_actions,
+                        "unique_on_collapse": unique_on_collapse,
+                        "has_collapse": 1.0 if collapsed_steps else 0.0,
                         "vcf_win_count": sum_vcf_win_count,
                         "avg_vcf_path_length": avg_vcf_path_length,
                         "new_vcf_injections": sum_new_vcf_injections,
@@ -373,6 +387,14 @@ class GRPOTrainer:
                 mlflow.log_metric("grpo_std_reward", metrics["std_reward"], step=iteration)
                 mlflow.log_metric("grpo_grad_norm", metrics["grad_norm"], step=iteration)
                 mlflow.log_metric("grpo_adv_collapse_rate", metrics.get("adv_collapse_rate", metrics.get("adv_collapsed", 0.0)), step=iteration)
+                # ユニーク手数の診断 (advantage消滅の原因A/B切り分け)
+                mlflow.log_metric("grpo_mean_unique_actions", metrics.get("mean_unique_actions", metrics.get("n_unique_actions", 0.0)), step=iteration)
+                # 消滅時のユニーク手数: 消滅が起きたイテレーションのみ記録 (0埋めで平均を歪めない)
+                if "unique_on_collapse" in metrics:
+                    if metrics.get("has_collapse", 0.0) == 1.0:
+                        mlflow.log_metric("grpo_unique_on_collapse", metrics["unique_on_collapse"], step=iteration)
+                elif metrics.get("adv_collapsed", 0.0) == 1.0:
+                    mlflow.log_metric("grpo_unique_on_collapse", metrics.get("n_unique_actions", 0.0), step=iteration)
                 mlflow.log_metric("grpo_vcf_win_count", metrics["vcf_win_count"], step=iteration)
                 mlflow.log_metric("grpo_avg_vcf_path_length", metrics["avg_vcf_path_length"], step=iteration)
                 mlflow.log_metric("grpo_new_vcf_injections", metrics["new_vcf_injections"], step=iteration)
