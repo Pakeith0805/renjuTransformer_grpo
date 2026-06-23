@@ -86,6 +86,11 @@ class GRPOTrainer:
 
         advantages = compute_group_advantages(rewards)
 
+        # advantage 消滅の検知: グループ内 reward の std がほぼ 0 だと
+        # advantage が全て 0 になり、policy_loss の勾配が消える（学習シグナルなし）
+        rewards_std = torch.tensor(rewards, dtype=torch.float32).std()
+        adv_collapsed = 1.0 if rewards_std < 1e-6 else 0.0
+
         advantages = advantages.to(self.agent.device)
 
         total_loss, policy_loss, kl_loss = self.compute_grpo_loss(
@@ -142,9 +147,10 @@ class GRPOTrainer:
             "loss": total_loss.item(),
             "policy_loss": policy_loss.item(),
             "kl_loss": kl_loss.item(),
-            "exact_kl": exact_kl,
+            "exact_kl": exact_kl.item() if hasattr(exact_kl, "item") else exact_kl,
             "mean_reward": mean_reward,
             "std_reward": std_reward,
+            "adv_collapsed": adv_collapsed,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm),
             "rewards": rewards,  # 個々の勝敗ログ
             "final_board": last_final_board,
@@ -204,7 +210,7 @@ class GRPOTrainer:
             log_probs_old: torch.Tensor,
             log_probs_ref: torch.Tensor,
             advantages: torch.Tensor,
-            exact_kl: float,
+            exact_kl: torch.Tensor,
             beta: float = 0.04,
             clip_eps: float = 0.2
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -214,9 +220,10 @@ class GRPOTrainer:
         surr2 = torch.clamp(ratios, 1.0 - clip_eps , 1.0 + clip_eps) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        # exact_kl: 全合法手の分布全体で計算した正確な KL(policy || ref)
-        # per-sample 推定量は VCF injection 時に爆発するため使わない
-        kl_loss = torch.tensor(exact_kl, device=policy_loss.device)
+        # exact_kl: 全合法手の分布全体で計算した正確な KL(policy || ref)（勾配あり）
+        # per-sample 推定量は VCF injection 時に爆発するため使わない。
+        # 勾配を保つことで policy を ref 方向へ引き戻す正則化が実際に効く。
+        kl_loss = exact_kl
         total_loss = policy_loss + beta * kl_loss
 
         return total_loss, policy_loss, kl_loss
@@ -281,6 +288,7 @@ class GRPOTrainer:
                     avg_mean_reward = sum(m["mean_reward"] for m in step_metrics_list) / total_steps
                     avg_std_reward = sum(m["std_reward"] for m in step_metrics_list) / total_steps
                     avg_grad_norm = sum(m["grad_norm"] for m in step_metrics_list) / total_steps
+                    avg_adv_collapsed = sum(m["adv_collapsed"] for m in step_metrics_list) / total_steps
                     sum_vcf_win_count = sum(m["vcf_win_count"] for m in step_metrics_list)
                     sum_new_vcf_injections = sum(m["new_vcf_injections"] for m in step_metrics_list)
 
@@ -303,6 +311,7 @@ class GRPOTrainer:
                         "mean_reward": avg_mean_reward,
                         "std_reward": avg_std_reward,
                         "grad_norm": avg_grad_norm,
+                        "adv_collapse_rate": avg_adv_collapsed,
                         "vcf_win_count": sum_vcf_win_count,
                         "avg_vcf_path_length": avg_vcf_path_length,
                         "new_vcf_injections": sum_new_vcf_injections,
@@ -354,6 +363,7 @@ class GRPOTrainer:
                 mlflow.log_metric("grpo_mean_reward", metrics["mean_reward"], step=iteration)
                 mlflow.log_metric("grpo_std_reward", metrics["std_reward"], step=iteration)
                 mlflow.log_metric("grpo_grad_norm", metrics["grad_norm"], step=iteration)
+                mlflow.log_metric("grpo_adv_collapse_rate", metrics.get("adv_collapse_rate", metrics.get("adv_collapsed", 0.0)), step=iteration)
                 mlflow.log_metric("grpo_vcf_win_count", metrics["vcf_win_count"], step=iteration)
                 mlflow.log_metric("grpo_avg_vcf_path_length", metrics["avg_vcf_path_length"], step=iteration)
                 mlflow.log_metric("grpo_new_vcf_injections", metrics["new_vcf_injections"], step=iteration)

@@ -353,13 +353,16 @@ class GRPOAgent:
             ref_dist = Categorical(probs=ref_probs)
             log_probs_ref = ref_dist.log_prob(sample_actions)
 
-        # 盤面全体（全225手）の正確なKLダイバージェンスを計算 (生の policy vs 生の reference)
+        # 盤面全体の正確な KL(policy || ref) を計算。
+        # policy 側は勾配を残す（KL 正則化を実際に効かせるため）。ref 側のみ no_grad。
+        # 合法手のみで計算し、非合法手の -inf による NaN（と NaN 勾配）を避ける。
+        policy_log_probs = torch.log_softmax(masked_policy_logits / temperature, dim=-1)
         with torch.no_grad():
-            policy_log_probs = torch.log_softmax(masked_policy_logits / temperature, dim=-1)
             ref_log_probs = torch.log_softmax(masked_ref_logits / temperature, dim=-1)
-            kl_elementwise = policy_probs * (policy_log_probs - ref_log_probs)
-            kl_elementwise = torch.nan_to_num(kl_elementwise, nan=0.0, posinf=0.0, neginf=0.0)
-            exact_kl = kl_elementwise.sum().item()
+        p_legal = policy_probs[legal_mask]
+        plp_legal = policy_log_probs[legal_mask]
+        rlp_legal = ref_log_probs[legal_mask]
+        exact_kl = (p_legal * (plp_legal - rlp_legal)).sum()
 
         return sample_actions, log_probs_policy, log_probs_old, log_probs_ref, exact_kl, p_raw_val
     
