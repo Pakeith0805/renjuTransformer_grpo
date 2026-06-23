@@ -33,3 +33,6 @@ grpo:
   save_every: null               # チェックポイント保存の間隔 (nullの場合はモードに応じて自動設定)
   max_plies: 80                  # 自己対戦データ収集時の最大手数制限
   vcf_target_prob: 0.4           # 自己対戦ロールアウト収集時のVCF手の目標サンプリング確率
+  dirichlet_alpha: 0.3           # Dirichletノイズの集中度 (小さいほど一様に近い探索)
+  dirichlet_weight: 0.25         # ノイズの混合比率 (0.0 で無効化)
+  skip_collapsed_steps: true     # advantage消滅ステップで optimizer.step をスキップ

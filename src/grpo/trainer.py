@@ -66,11 +66,16 @@ class GRPOTrainer:
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
         vcf_target_prob = self.cfg.grpo.get("vcf_target_prob", 0.4)
+        group_size = self.cfg.grpo.get("group_size", 8)
+        dirichlet_alpha = self.cfg.grpo.get("dirichlet_alpha", 0.3)
+        dirichlet_weight = self.cfg.grpo.get("dirichlet_weight", 0.25)
         actions, log_probs_policy, log_probs_old, log_probs_ref, exact_kl, p_raw_val = self.agent.get_group_actions(
-            board_state, 
-            group_size=8, 
+            board_state,
+            group_size=group_size,
             temperature=self.cfg.grpo.temperature,
-            vcf_target_prob=vcf_target_prob
+            vcf_target_prob=vcf_target_prob,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_weight=dirichlet_weight,
         )
 
         # 報酬を回収 (並列 MCTS 評価)
@@ -109,7 +114,11 @@ class GRPOTrainer:
 
         grad_norm = torch.nn.utils.clip_grad_norm_(self.agent.policy.parameters(), max_norm=1.0)
 
-        self.optimizer.step()
+        # advantage が消滅しているステップは policy 勾配がゼロなので optimizer.step をスキップ。
+        # KL 勾配は残るため ref からの過剰なドリフトを防ぐ効果もある。
+        skip_update = self.cfg.grpo.get("skip_collapsed_steps", True) and adv_collapsed == 1.0
+        if not skip_update:
+            self.optimizer.step()
 
         # Check if TSS is enabled for training rollouts and extract VCF paths
         new_trajectory_boards = []

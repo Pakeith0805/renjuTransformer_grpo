@@ -287,7 +287,8 @@ class GRPOAgent:
         except Exception as e:
             print(f"Warning: Failed to pre-load MCTS DLL: {e}", file=sys.stderr)
 
-    def get_group_actions(self, board_state, group_size=8, temperature=1.0, vcf_target_prob=0.4):
+    def get_group_actions(self, board_state, group_size=8, temperature=1.0, vcf_target_prob=0.4,
+                          dirichlet_alpha=0.3, dirichlet_weight=0.25):
         """盤面から G 個のアクションと、Policy/Ref それぞれ of 対数確率、および正確なKLダイバージェンスを計算して返す"""
         import math
         input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
@@ -333,8 +334,24 @@ class GRPOAgent:
             except Exception as e:
                 print(f"Warning: VCF dynamic bias failed in get_group_actions: {e}", file=sys.stderr)
 
-        # Sampling Actions: from biased_probs if exists, otherwise raw policy_probs
-        sampling_probs = biased_probs if biased_probs is not None else policy_probs
+        # Dirichlet noise injection for exploration diversity (sampling only, not KL)
+        base_probs = biased_probs if biased_probs is not None else policy_probs
+        if dirichlet_alpha > 0.0 and dirichlet_weight > 0.0:
+            legal_indices = legal_mask.nonzero(as_tuple=True)[0]
+            n_legal = legal_indices.shape[0]
+            if n_legal > 1:
+                noise = torch.distributions.Dirichlet(
+                    torch.full((n_legal,), dirichlet_alpha, device=self.device)
+                ).sample()
+                noisy_probs = base_probs.clone()
+                noisy_probs[legal_indices] = (
+                    (1.0 - dirichlet_weight) * base_probs[legal_indices] + dirichlet_weight * noise
+                )
+                sampling_probs = noisy_probs
+            else:
+                sampling_probs = base_probs
+        else:
+            sampling_probs = base_probs
         behavior_dist = Categorical(probs=sampling_probs)
         sample_actions = behavior_dist.sample((group_size,))
 
