@@ -626,10 +626,18 @@ struct MCTSNode {
         if (children.empty()) {
             throw std::runtime_error("best_child called on a node with no children.");
         }
-        if (use_puct) {
+        // ミニマックス: このノードの手番が root_player でなければ、相手は root_player の
+        // 勝率を最小化したい。評価値 q を 1-q に反転して「最大化」に統一する。
+        const bool maximize_for_root = (player_to_move == root_player);
+        // priorが割り当てられるのはルート直下の子だけなので、PUCTはルートのみ。
+        // 深い階層は prior=1.0 で一様になり、UCB1の方が探索として素直。
+        const bool use_puct_here = use_puct && (parent == nullptr);
+
+        if (use_puct_here) {
             const double sqrt_visits = std::sqrt(static_cast<double>(visits));
             auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
-                const double exploitation = child->wins / static_cast<double>(child->visits);
+                const double q = child->wins / static_cast<double>(child->visits);
+                const double exploitation = maximize_for_root ? q : (1.0 - q);
                 const double exploration_term =
                     exploration * child->prior_prob * sqrt_visits / (1.0 + child->visits);
                 return exploitation + exploration_term;
@@ -641,7 +649,8 @@ struct MCTSNode {
         } else {
             const double log_visits = std::log(static_cast<double>(visits));
             auto score_of = [&](const std::unique_ptr<MCTSNode>& child) {
-                const double exploitation = child->wins / static_cast<double>(child->visits);
+                const double q = child->wins / static_cast<double>(child->visits);
+                const double exploitation = maximize_for_root ? q : (1.0 - q);
                 const double exploration_term =
                     exploration * std::sqrt(log_visits / static_cast<double>(child->visits));
                 return exploitation + exploration_term;

@@ -119,5 +119,12 @@ for rf in $(ls "$TMP_DIR"/res_*.tsv 2>/dev/null | sort); do
   echo "${label},${ckpt},${policy},${mcts},${plies},${win_plies},${loss_plies}" >> "$OUT_CSV"
 done
 
+# 中間ファイル (重みごとの res_*.tsv と _list.tsv) を掃除。
+# 並列書き込みの衝突回避のため一時的に分けているだけなので、集約後は不要。
+# デバッグ等で残したい場合は KEEP_TMP=1 を付ける。
+if [ "${KEEP_TMP:-0}" != "1" ]; then
+  rm -rf "$TMP_DIR"
+fi
+
 echo
 echo "Done. CSV -> $OUT_CSV   (opponent=$OPP, sims=$SIMS, games=$NUM_GAMES, parallel=$MAX_PAR)"
