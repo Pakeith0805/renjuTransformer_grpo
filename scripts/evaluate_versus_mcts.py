@@ -249,6 +249,8 @@ def main(cfg: DictConfig) -> None:
         "mcts_wins_white": 0,
         "draws": 0,
         "total_plies": 0,
+        "model_win_plies": 0,   # モデルが勝った局の手数合計 (攻めの決定力)
+        "model_loss_plies": 0,  # モデルが負けた局の手数合計 (守りの崩壊速度)
     }
     
     last_board = None
@@ -286,11 +288,13 @@ def main(cfg: DictConfig) -> None:
                 stats["draws"] += 1
             else:
                 if winner_is_model:
+                    stats["model_win_plies"] += res["plies"]
                     if is_model_black:
                         stats["model_wins_black"] += 1
                     else:
                         stats["model_wins_white"] += 1
                 else:
+                    stats["model_loss_plies"] += res["plies"]
                     if is_model_black:
                         stats["mcts_wins_white"] += 1
                     else:
@@ -306,7 +310,9 @@ def main(cfg: DictConfig) -> None:
     mcts_wins = stats["mcts_wins_black"] + stats["mcts_wins_white"]
     draws = stats["draws"]
     avg_plies = stats["total_plies"] / num_games
-    
+    avg_win_plies = (stats["model_win_plies"] / model_wins) if model_wins else 0.0
+    avg_loss_plies = (stats["model_loss_plies"] / mcts_wins) if mcts_wins else 0.0
+
     model_win_rate = (model_wins / num_games) * 100
     mcts_win_rate = (mcts_wins / num_games) * 100
     draw_rate = (draws / num_games) * 100
@@ -316,6 +322,8 @@ def main(cfg: DictConfig) -> None:
     print("=" * 60)
     print(f"Total Matches Played: {num_games}")
     print(f"Average Game Length:  {avg_plies:.1f} plies")
+    print(f"  Avg plies (Model WINS):  {avg_win_plies:.1f} plies ({model_wins} games)")
+    print(f"  Avg plies (Model LOSES): {avg_loss_plies:.1f} plies ({mcts_wins} games)")
     print(f"Draws:                {draws} ({draw_rate:.1f}%)")
     print("-" * 60)
     print(f"Target Model (Black Wins: {stats['model_wins_black']}, White Wins: {stats['model_wins_white']})")
