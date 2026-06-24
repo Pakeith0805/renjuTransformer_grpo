@@ -288,7 +288,7 @@ class GRPOAgent:
             print(f"Warning: Failed to pre-load MCTS DLL: {e}", file=sys.stderr)
 
     def get_group_actions(self, board_state, group_size=8, temperature=1.0, vcf_target_prob=0.4,
-                          dirichlet_alpha=0.3, dirichlet_weight=0.25):
+                          dirichlet_alpha=0.3, dirichlet_weight=0.25, use_topk_weighted=False):
         """盤面から G 個のアクションと、Policy/Ref それぞれ of 対数確率、および正確なKLダイバージェンスを計算して返す"""
         import math
         input_ids = self.tokenizer.encode_input(board_state).unsqueeze(0).to(self.device)
@@ -334,7 +334,7 @@ class GRPOAgent:
             except Exception as e:
                 print(f"Warning: VCF dynamic bias failed in get_group_actions: {e}", file=sys.stderr)
 
-        # Dirichlet noise injection for exploration diversity (sampling only, not KL)
+        # Dirichlet noise injection (探索の多様化; 選択にのみ効かせ、KL や重みには使わない)
         base_probs = biased_probs if biased_probs is not None else policy_probs
         if dirichlet_alpha > 0.0 and dirichlet_weight > 0.0:
             legal_indices = legal_mask.nonzero(as_tuple=True)[0]
@@ -352,34 +352,41 @@ class GRPOAgent:
                 sampling_probs = base_probs
         else:
             sampling_probs = base_probs
-        behavior_dist = Categorical(probs=sampling_probs)
-        sample_actions = behavior_dist.sample((group_size,))
 
-        # log_probs_policy (with gradient, unbiased): evaluate under original policy distribution
-        policy_dist = Categorical(probs=policy_probs)
-        log_probs_policy = policy_dist.log_prob(sample_actions)
-        
-        # log_probs_old (detached, biased): evaluate under sampling behavior distribution
-        log_probs_old = behavior_dist.log_prob(sample_actions).detach()
-
-        # log_probs_ref (detached, unbiased): evaluate under reference distribution
+        # 勾配を残した log π（両モード共用）と、参照分布の log_softmax を用意。
+        policy_log_probs = torch.log_softmax(masked_policy_logits / temperature, dim=-1)
         with torch.no_grad():
             ref_logits = self.ref(input_ids).squeeze(0)
             masked_ref_logits = ref_logits.masked_fill(~legal_mask, float("-inf"))
-            ref_probs = torch.softmax(masked_ref_logits / temperature, dim=-1)
-            ref_dist = Categorical(probs=ref_probs)
-            log_probs_ref = ref_dist.log_prob(sample_actions)
-
-        # 盤面全体の正確な KL(policy || ref) を計算。
-        # policy 側は勾配を残す（KL 正則化を実際に効かせるため）。ref 側のみ no_grad。
-        # 合法手のみで計算し、非合法手の -inf による NaN（と NaN 勾配）を避ける。
-        policy_log_probs = torch.log_softmax(masked_policy_logits / temperature, dim=-1)
-        with torch.no_grad():
             ref_log_probs = torch.log_softmax(masked_ref_logits / temperature, dim=-1)
+
+        # 盤面全体の正確な KL(policy || ref)（policy 側は勾配あり、ref 側 no_grad、合法手のみ）
         p_legal = policy_probs[legal_mask]
         plp_legal = policy_log_probs[legal_mask]
         rlp_legal = ref_log_probs[legal_mask]
         exact_kl = (p_legal * (plp_legal - rlp_legal)).sum()
+
+        if use_topk_weighted:
+            # === top-K 列挙版（選択=ノイズ入り分布 sampling_probs / 重み=真の方策 π）===
+            # ノイズ入り分布から上位 K 個の「相異なる」手を取る。非合法手は masked softmax で
+            # 確率 0 のため topk に混入しない。重複が無いので評価予算を無駄にしない。
+            n_legal_t = int(legal_mask.sum().item())
+            k = min(group_size, n_legal_t)
+            actions = torch.topk(sampling_probs, k).indices
+            # 重み w(a) = π(a)（detach）を集合内で正規化（バイアスを避けるため重みは真の方策）
+            with torch.no_grad():
+                weights = policy_probs[actions]
+                weights = weights / (weights.sum() + 1e-12)
+            log_probs_policy = policy_log_probs[actions]  # 勾配あり
+            # 第3要素=weights, 第4要素=None（重み付き損失では log_probs_ref を使わない）
+            return actions, log_probs_policy, weights, None, exact_kl, p_raw_val
+
+        # === 既存: モンテカルロ・サンプリング版 ===
+        behavior_dist = Categorical(probs=sampling_probs)
+        sample_actions = behavior_dist.sample((group_size,))
+        log_probs_policy = policy_log_probs[sample_actions]               # 勾配あり (真の方策)
+        log_probs_old = behavior_dist.log_prob(sample_actions).detach()   # 勾配なし (行動分布)
+        log_probs_ref = ref_log_probs[sample_actions]                     # 勾配なし (参照分布)
 
         return sample_actions, log_probs_policy, log_probs_old, log_probs_ref, exact_kl, p_raw_val
     

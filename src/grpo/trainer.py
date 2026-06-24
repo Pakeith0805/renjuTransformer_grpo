@@ -42,17 +42,29 @@ def load_initial_trajectory_boards(csv_gz_path: Path, num_samples: int = 300) ->
 
 
 # 報酬を受け取ってアドバンテージを返す関数
-def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def compute_group_advantages(rewards: list[float] | torch.Tensor, eps: float = 1e-8,
+                             weights: torch.Tensor | None = None) -> torch.Tensor:
     if not isinstance(rewards, torch.Tensor):
         rewards = torch.tensor(rewards, dtype=torch.float32)
 
-    mean = rewards.mean()
-    std = rewards.std()
+    # 群が1要素以下だと std が定義できない（top-K で合法手1つの局面など）
+    if rewards.numel() < 2:
+        return torch.zeros_like(rewards)
 
+    std = rewards.std()
     if std < 1e-6:
         return torch.zeros_like(rewards)
 
-    advantages = (rewards - mean) / (std + eps)
+    # ベースライン: 重みがあれば π 重み付き平均（期待値版GRPOの分散最小ベースライン）、無ければ単純平均
+    if weights is not None:
+        if not isinstance(weights, torch.Tensor):
+            weights = torch.tensor(weights, dtype=torch.float32)
+        weights = weights.detach().to(rewards.device, dtype=rewards.dtype)
+        baseline = (weights * rewards).sum()
+    else:
+        baseline = rewards.mean()
+
+    advantages = (rewards - baseline) / (std + eps)
 
     return advantages
 
@@ -69,13 +81,17 @@ class GRPOTrainer:
         group_size = self.cfg.grpo.get("group_size", 8)
         dirichlet_alpha = self.cfg.grpo.get("dirichlet_alpha", 0.3)
         dirichlet_weight = self.cfg.grpo.get("dirichlet_weight", 0.25)
-        actions, log_probs_policy, log_probs_old, log_probs_ref, exact_kl, p_raw_val = self.agent.get_group_actions(
+        use_topk = self.cfg.grpo.get("use_topk_weighted", False)
+        # aux3/aux4 はモードで意味が変わる:
+        #   sampling → (log_probs_old, log_probs_ref) / topk → (weights, None)
+        actions, log_probs_policy, aux3, aux4, exact_kl, p_raw_val = self.agent.get_group_actions(
             board_state,
             group_size=group_size,
             temperature=self.cfg.grpo.temperature,
             vcf_target_prob=vcf_target_prob,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_weight=dirichlet_weight,
+            use_topk_weighted=use_topk,
         )
 
         # 報酬を回収 (並列 MCTS 評価)
@@ -91,7 +107,10 @@ class GRPOTrainer:
             length_penalty_coef=penalty_coef
         )
 
-        advantages = compute_group_advantages(rewards)
+        if use_topk:
+            advantages = compute_group_advantages(rewards, weights=aux3)
+        else:
+            advantages = compute_group_advantages(rewards)
 
         # advantage 消滅の検知: グループ内 reward の std がほぼ 0 だと
         # advantage が全て 0 になり、policy_loss の勾配が消える（学習シグナルなし）
@@ -100,15 +119,24 @@ class GRPOTrainer:
 
         advantages = advantages.to(self.agent.device)
 
-        total_loss, policy_loss, kl_loss = self.compute_grpo_loss(
-            log_probs_policy=log_probs_policy,  # 勾配あり (Policyモデルを更新するため)
-            log_probs_old=log_probs_old,        # 勾配なし (基準値)
-            log_probs_ref=log_probs_ref,        # 勾配なし (Referenceモデル)
-            advantages=advantages,
-            exact_kl=exact_kl,
-            beta=beta,
-            clip_eps=clip_eps
-        )
+        if use_topk:
+            total_loss, policy_loss, kl_loss = self.compute_grpo_loss_weighted(
+                log_probs_policy=log_probs_policy,        # 勾配あり
+                weights=aux3.to(self.agent.device),       # w(a)=π(a) (detach)
+                advantages=advantages,
+                exact_kl=exact_kl,
+                beta=beta,
+            )
+        else:
+            total_loss, policy_loss, kl_loss = self.compute_grpo_loss(
+                log_probs_policy=log_probs_policy,  # 勾配あり (Policyモデルを更新するため)
+                log_probs_old=aux3,                 # 勾配なし (行動分布)
+                log_probs_ref=aux4,                 # 勾配なし (Referenceモデル)
+                advantages=advantages,
+                exact_kl=exact_kl,
+                beta=beta,
+                clip_eps=clip_eps
+            )
 
         self.optimizer.zero_grad()
 
@@ -239,7 +267,24 @@ class GRPOTrainer:
         total_loss = policy_loss + beta * kl_loss
 
         return total_loss, policy_loss, kl_loss
-    
+
+    def compute_grpo_loss_weighted(
+            self,
+            log_probs_policy: torch.Tensor,
+            weights: torch.Tensor,
+            advantages: torch.Tensor,
+            exact_kl: torch.Tensor,
+            beta: float = 0.04
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # 期待値版 GRPO: L = - Σ_a w(a) A(a) log π(a)
+        #   選択はノイズ入り分布の top-K、重み w(a)=π(a) と advantage A(a) は detached、log π に勾配。
+        #   決定論的列挙なので importance sampling / PPO clip は使わない（ratio=1相当）。
+        #   勾配 = -Σ w A ∇log π = 期待advantage勾配（top-K集合上）。
+        policy_loss = -(weights * advantages * log_probs_policy).sum()
+        kl_loss = exact_kl
+        total_loss = policy_loss + beta * kl_loss
+        return total_loss, policy_loss, kl_loss
+
     def train(self, num_iterations: int = 1000, save_every: int = 50, run_id: str = None, start_iteration: int = 1):
         """
         強化学習（GRPO）のメインループを実行します (初期盤面のみのシンプルテスト版)。
