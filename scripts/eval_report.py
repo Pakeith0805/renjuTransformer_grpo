@@ -88,15 +88,20 @@ def section_versus(model_a, pretrained, device, raw):
 # --------------------------------------------------------------------------- #
 # ② evaluate_versus_mcts: チェックポイントを ~20イテごとに MCTS(teacher) 評価
 # --------------------------------------------------------------------------- #
-def list_checkpoints(ckpt_dir, step):
+def list_checkpoints(ckpt_dir, step, iter_min=None, iter_max=None):
     ckpts = []
     for f in Path(ckpt_dir).glob("grpo_checkpoint_*.pt"):
         m = re.search(r"_(\d+)\.pt$", f.name)
         if m:
             ckpts.append((int(m.group(1)), f))
     ckpts.sort()
-    picked = [(n, f) for (n, f) in ckpts if n % step == 0]
-    if ckpts and ckpts[-1] not in picked:   # 最終チェックポイントは必ず含める
+
+    def inrange(n):
+        return (iter_min is None or n >= iter_min) and (iter_max is None or n <= iter_max)
+
+    picked = [(n, f) for (n, f) in ckpts if n % step == 0 and inrange(n)]
+    # 範囲指定が無いときだけ最終チェックポイントを必ず含める(範囲指定時は意図的に絞っている)
+    if iter_min is None and iter_max is None and ckpts and ckpts[-1] not in picked:
         picked.append(ckpts[-1])
     return picked
 
@@ -122,7 +127,8 @@ def eval_one_vs_mcts(model_path, pretrained, device, sims, games, raw, label):
     )
 
 
-def section_mcts(model_a, pretrained, ckpt_dir, step, device, sims, games, raw):
+def section_mcts(model_a, pretrained, ckpt_dir, step, device, sims, games, raw,
+                 iter_min=None, iter_max=None):
     md = [f"## ② evaluate_versus_mcts: vs teacher-MCTS "
           f"(sims={sims}, TSS/PUCT=on, temp0, {games}戦)\n",
           "| iter | モデル勝率 | MCTS勝率 | 平均手数 | 勝ち手数 | 負け手数 |",
@@ -131,7 +137,7 @@ def section_mcts(model_a, pretrained, ckpt_dir, step, device, sims, games, raw):
     # iter0 として pretrained を基準に入れる
     targets.append(("0 (pretrained)", pretrained))
     if ckpt_dir:
-        for n, f in list_checkpoints(ckpt_dir, step):
+        for n, f in list_checkpoints(ckpt_dir, step, iter_min, iter_max):
             targets.append((str(n), str(f)))
     else:
         targets.append(("modelA", model_a))
@@ -193,6 +199,8 @@ def main():
     ap.add_argument("--pretrained", default="artifacts/checkpoints/pretrained.pt")
     ap.add_argument("--ckpt-dir", default=None, help="②用: grpo_checkpoint_N.pt が入ったディレクトリ")
     ap.add_argument("--iter-step", type=int, default=20)
+    ap.add_argument("--iter-min", type=int, default=None, help="②で評価するiterの下限(範囲を絞る)")
+    ap.add_argument("--iter-max", type=int, default=None, help="②で評価するiterの上限")
     ap.add_argument("--decline-csv", default="eval_decline_curve.csv")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--mcts-sims", type=int, default=200)
@@ -216,7 +224,8 @@ def main():
     if "mcts" not in skip:
         print("[2/3] evaluate_versus_mcts ...", file=sys.stderr)
         parts.append(section_mcts(args.model_a, args.pretrained, args.ckpt_dir,
-                                  args.iter_step, args.device, args.mcts_sims, args.mcts_games, raw))
+                                  args.iter_step, args.device, args.mcts_sims, args.mcts_games, raw,
+                                  iter_min=args.iter_min, iter_max=args.iter_max))
     if "decline" not in skip:
         print("[3/3] decline curve ...", file=sys.stderr)
         parts.append(section_decline(args.decline_csv))
