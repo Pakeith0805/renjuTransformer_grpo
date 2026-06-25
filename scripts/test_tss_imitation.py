@@ -38,7 +38,7 @@ if str(SRC_DIR) not in sys.path:
 
 from renju_transformer.model import RenjuTransformerModel
 from renju_transformer.tokenizer import RenjuTokenizer
-from renju_transformer.rules import infer_player, legal_move_mask  # noqa: F401 (parity/oracle 共有)
+from renju_transformer.rules import infer_player, legal_move_mask, winner_after_move  # noqa: F401
 from renju_transformer.utils import select_device, set_seed
 
 N = 15
@@ -272,6 +272,68 @@ def make_case(name, rng, depth, tries=200):
 
 
 # --------------------------------------------------------------------------- #
+# ケース収集: template(型) と random(自然局面+オラクル選別)
+# --------------------------------------------------------------------------- #
+def collect_template_cases(rng, depth, per_category):
+    cases = []
+    for cat in GENERATORS:
+        made, fails = 0, 0
+        while made < per_category and fails < per_category * 3 + 50:
+            c = make_case(cat, rng, depth)
+            if c is None:
+                fails += 1
+                continue
+            cases.append(dict(cat=cat, board=c["board"], answer=c["answer"],
+                              distractor=c["distractor"], kind=c["oracle_kind"]))
+            made += 1
+        if made < per_category:
+            print(f"[warn] {cat}: {made}/{per_category} 盤面のみ生成", file=sys.stderr)
+    return cases
+
+
+def gen_random_position(rng, kmin, kmax):
+    """空盤からランダムに合法手を K 手打って自然な中盤局面を作る。途中で決着したら破棄。"""
+    k = rng.randint(kmin, kmax)
+    board = [EMPTY] * 225
+    for _ in range(k):
+        legal = [i for i, ok in enumerate(legal_move_mask(board)) if ok]
+        if not legal:
+            return None
+        player = infer_player(board)
+        mv = rng.choice(legal)
+        board[mv] = player
+        if winner_after_move(board, mv, player) is not None:
+            return None  # 決着済みは捨てる
+    return board
+
+
+def collect_random_cases(rng, depth, per_category, kmin, kmax):
+    """自然局面を量産し、オラクルが attack/block と判定したものだけ各 per_category まで採用。"""
+    buckets = {"attack": [], "block": []}
+    cap = per_category * 600 + 3000
+    for _ in range(cap):
+        if all(len(buckets[k]) >= per_category for k in buckets):
+            break
+        board = gen_random_position(rng, kmin, kmax)
+        if board is None:
+            continue
+        try:
+            kind, mv = oracle(board, depth)
+        except ValueError:
+            continue
+        if kind is None or mv < 0 or not legal_move_mask(board)[mv]:
+            continue
+        if len(buckets[kind]) < per_category:
+            buckets[kind].append(dict(cat=kind, board=board, answer=mv,
+                                      distractor=set(), kind=kind))
+    for k in buckets:
+        if len(buckets[k]) < per_category:
+            print(f"[warn] random {k}: {len(buckets[k])}/{per_category} のみ採用(自然局面では稀)",
+                  file=sys.stderr)
+    return buckets["attack"] + buckets["block"]
+
+
+# --------------------------------------------------------------------------- #
 # モデル
 # --------------------------------------------------------------------------- #
 def load_model(path, device):
@@ -315,6 +377,10 @@ def main():
     ap.add_argument("--models", nargs="+", required=True,
                     help="label=path の並び。例: pretrained=models/pretrained.pt g32=.../ckpt_80.pt")
     ap.add_argument("--per-category", type=int, default=200)
+    ap.add_argument("--source", choices=["template", "random"], default="template",
+                    help="template=型生成 / random=ランダム対局K手→オラクル選別の自然局面")
+    ap.add_argument("--kmin", type=int, default=8, help="random: 進める手数の下限")
+    ap.add_argument("--kmax", type=int, default=30, help="random: 進める手数の上限")
     ap.add_argument("--depth", type=int, default=12, help="VCF 探索深さ(オラクル)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
@@ -333,36 +399,38 @@ def main():
         models[label] = load_model(path, device)
         print(f"loaded {label}: {path}")
 
-    categories = list(GENERATORS.keys())
+    # ---- ケース収集 (ソース別) ----
+    if args.source == "random":
+        cases = collect_random_cases(rng, args.depth, args.per_category, args.kmin, args.kmax)
+    else:
+        cases = collect_template_cases(rng, args.depth, args.per_category)
+    print(f"collected {len(cases)} cases (source={args.source})")
+
+    categories = []
+    for c in cases:
+        if c["cat"] not in categories:
+            categories.append(c["cat"])
     # 集計: agg[label][cat] = [n, top1_hits, prob_sum, distractor_hits]
     agg = {lab: {cat: [0, 0, 0.0, 0] for cat in categories} for lab in models}
+    shown = {cat: 0 for cat in categories}
     rows = []
 
-    for cat in categories:
-        made, shown, fails = 0, 0, 0
-        while made < args.per_category and fails < args.per_category * 3 + 50:
-            case = make_case(cat, rng, args.depth)
-            if case is None:
-                fails += 1
-                continue
-            board, ans, distr = case["board"], case["answer"], case["distractor"]
-            if shown < args.show:
-                print(f"\n--- {cat} #{made} (手番={'黒' if infer_player(board)==BLACK else '白'}, "
-                      f"オラクル={case['oracle_kind']} @ {divmod(ans, N)}) ---")
-                print_board(board)
-                shown += 1
-            for lab, model in models.items():
-                pred, probs = predict(model, tokenizer, board, device)
-                a = agg[lab][cat]
-                a[0] += 1
-                a[1] += int(pred == ans)
-                a[2] += float(probs[ans].item())
-                a[3] += int(pred in distr)
-                rows.append((lab, cat, ans, pred, int(pred == ans),
-                             round(float(probs[ans].item()), 4), int(pred in distr)))
-            made += 1
-        if made < args.per_category:
-            print(f"[warn] {cat}: {made}/{args.per_category} 盤面のみ生成(歩留まり低)", file=sys.stderr)
+    for case in cases:
+        cat, board, ans, distr = case["cat"], case["board"], case["answer"], case["distractor"]
+        if shown[cat] < args.show:
+            print(f"\n--- {cat} (手番={'黒' if infer_player(board)==BLACK else '白'}, "
+                  f"オラクル={case['kind']} @ {divmod(ans, N)}) ---")
+            print_board(board)
+            shown[cat] += 1
+        for lab, model in models.items():
+            pred, probs = predict(model, tokenizer, board, device)
+            a = agg[lab][cat]
+            a[0] += 1
+            a[1] += int(pred == ans)
+            a[2] += float(probs[ans].item())
+            a[3] += int(pred in distr)
+            rows.append((lab, cat, ans, pred, int(pred == ans),
+                         round(float(probs[ans].item()), 4), int(pred in distr)))
 
     # ---- レポート ----
     print("\n" + "=" * 72)
