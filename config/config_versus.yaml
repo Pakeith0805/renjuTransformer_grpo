@@ -14,3 +14,8 @@ versus:
   num_games: 20       # Should be an even number so both models play black and white equally
   temperature: 0.0    # 0.0 for argmax (deterministic), >0.0 for sampling
   device: auto
+  # 開幕を散らして「単一の暗記ライン」での評価を防ぐ。
+  # 0 = 無効(従来通り)。>0 にすると各対局の冒頭をこの手数だけ両者ランダムに打ってから
+  # モデル対局に入る。低温(argmax近辺)でも多様な局面で素の強さを測れる。
+  # 安全のため <=8 推奨(連が成立しない手数なので開幕中に決着しない)。
+  random_opening_plies: 0

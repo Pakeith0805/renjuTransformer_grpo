@@ -58,9 +58,14 @@ def main(cfg: DictConfig) -> None:
     
     num_games = cfg.versus.num_games
     temperature = cfg.versus.temperature
-    
-    print(f"\nStarting {num_games} matches evaluation (temperature={temperature})...")
-    
+    # 開幕ランダム化のオンオフ。0 = 従来通り(単一シード・固定開幕)。
+    random_opening_plies = int(cfg.versus.get("random_opening_plies", 0))
+
+    msg = f"\nStarting {num_games} matches evaluation (temperature={temperature}"
+    if random_opening_plies > 0:
+        msg += f", random_opening_plies={random_opening_plies}"
+    print(msg + ")...")
+
     stats = {
         "a_wins_black": 0,
         "a_wins_white": 0,
@@ -69,20 +74,43 @@ def main(cfg: DictConfig) -> None:
         "draws": 0,
         "total_plies": 0,
     }
-    
+    # 棋譜の多様性を測る: 着手列をそのまま署名にしてユニーク数を数える。
+    # 単一ラインに頼っているほど unique_games が小さくなる。
+    seen_games = set()
+
     for game_idx in range(1, num_games + 1):
+        # 開幕ランダム化時のみ対局ごとに別シードを振り、開幕とサンプリングを散らす。
+        # 無効時は冒頭の set_seed(cfg.seed) のまま(従来挙動を完全維持)。
+        if random_opening_plies > 0:
+            set_seed(cfg.seed + game_idx)
+
         # Odd games: Model A = Black, Model B = White
         # Even games: Model B = Black, Model A = White
         is_model_a_black = (game_idx % 2 == 1)
-        
+
         black_name = "Model A" if is_model_a_black else "Model B"
         white_name = "Model B" if is_model_a_black else "Model A"
         print(f"Game {game_idx}/{num_games}: [Black] {black_name} vs [White] {white_name}")
-        
+
         board = [0] * 225
         winner = None
         plies = 0
-        
+        move_history = []
+
+        # --- 開幕ランダム手 (両者ランダム) ----------------------------------
+        # <=8手なら連が成立せず開幕中に決着しないので winner 判定は不要。
+        for _ in range(random_opening_plies):
+            current_player = infer_player(board)
+            legal_mask = tokenizer.legal_move_mask(board)
+            legal_idx = legal_mask.nonzero(as_tuple=True)[0]
+            if legal_idx.numel() == 0:
+                break
+            pick = torch.randint(legal_idx.numel(), (1,)).item()
+            move_idx = int(legal_idx[pick].item())
+            board[move_idx] = current_player
+            plies += 1
+            move_history.append(move_idx)
+
         for ply in range(1, 226):
             current_player = infer_player(board)
             current_is_a = (current_player == 1) if is_model_a_black else (current_player == 2)
@@ -109,12 +137,14 @@ def main(cfg: DictConfig) -> None:
             
             board[move_idx] = current_player
             plies += 1
-            
+            move_history.append(move_idx)
+
             winner = winner_after_move(board, move_idx, current_player)
             if winner is not None:
                 break
-        
+
         stats["total_plies"] += plies
+        seen_games.add(tuple(move_history))
         
         if winner is None:
             stats["draws"] += 1
@@ -153,6 +183,8 @@ def main(cfg: DictConfig) -> None:
     print("=" * 60)
     print(f"Total Matches Played: {num_games}")
     print(f"Average Game Length:  {avg_plies:.1f} plies")
+    print(f"Unique Games:         {len(seen_games)} / {num_games} "
+          f"({len(seen_games) / num_games * 100:.0f}% distinct)")
     print(f"Draws:                {draws} ({draw_rate:.1f}%)")
     print("-" * 60)
     print(f"Model A (Black Wins: {stats['a_wins_black']}, White Wins: {stats['a_wins_white']})")
