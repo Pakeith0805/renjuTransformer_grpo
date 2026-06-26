@@ -37,3 +37,5 @@ grpo:
   dirichlet_weight: 0.25         # ノイズの混合比率 (0.0 で無効化)
   skip_collapsed_steps: true     # advantage消滅ステップで optimizer.step をスキップ
   use_topk_weighted: false       # true: ノイズ→top-K(π̃)列挙→π重み和（期待値版GRPO） / false: 従来のMCサンプリング
+  use_value_judge: false         # true: 報酬を MCTSロールアウトでなく value net(一括GPU評価)+TSS上書きで出す(v1)
+  value_judge_path: models/pretrained_value.pt  # use_value_judge=true 時に使う value ヘッド付き checkpoint

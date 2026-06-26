@@ -79,6 +79,26 @@ def load_policy_and_reference(policy_checkpoint_path: str | Path, ref_checkpoint
 
     return policy_model, ref_model
 
+def load_value_model(value_checkpoint_path: str | Path, device: torch.device):
+    """value ヘッド付きの判定者モデルをロードして固定(eval, requires_grad=False)で返す。"""
+    value_checkpoint_path = Path(value_checkpoint_path)
+    if not value_checkpoint_path.exists():
+        raise FileNotFoundError(f"Value checkpoint not found at: {value_checkpoint_path}")
+    ckpt = torch.load(value_checkpoint_path, map_location=device, weights_only=False)
+    mc = ckpt["config"]["model"]
+    model = RenjuTransformerModel(
+        vocab_size=mc["token_vocab_size"], max_seq_len=mc["max_seq_len"], d_model=mc["d_model"],
+        nhead=mc["nhead"], num_layers=mc["num_layers"], dim_feedforward=mc["dim_feedforward"],
+        dropout=mc["dropout"], activation=mc["activation"], norm_first=mc["norm_first"],
+        num_move_labels=mc["num_move_labels"], with_value_head=True,
+    )
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    for p in model.parameters():
+        p.requires_grad = False
+    model.to(device).eval()
+    return model
+
+
 def print_board(board_state: list[int]):
     """
     15x15 の五目並べ盤面をターミナルに綺麗なテキストグリッドとして描画します。

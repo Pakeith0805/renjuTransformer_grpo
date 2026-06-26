@@ -73,6 +73,13 @@ def main(cfg: DictConfig) -> None:
     
     # 6. Agent と Trainer のインスタンス化
     mcts_simulations = cfg.grpo.get("mcts_simulations", 200) # cfgからシミュレーション回数をとってくる。あればその値を、なければ200を。
+    # value 判定者(v1): use_value_judge=true なら報酬を value net で出す
+    value_model = None
+    if cfg.grpo.get("use_value_judge", False):
+        from grpo.load_model import load_value_model
+        vpath = cfg.grpo.get("value_judge_path", "models/pretrained_value.pt")
+        print(f"Loading value judge from: {vpath}")
+        value_model = load_value_model(vpath, device)
     agent = GRPOAgent(
         policy_model=policy_model,
         ref_model=ref_model,
@@ -82,7 +89,8 @@ def main(cfg: DictConfig) -> None:
         use_tss_collection=cfg.grpo.get("use_tss_collection", False),
         use_tss_training=cfg.grpo.get("use_tss_training", False),
         use_puct_collection=cfg.grpo.get("use_puct_collection", False),
-        use_puct_training=cfg.grpo.get("use_puct_training", False)
+        use_puct_training=cfg.grpo.get("use_puct_training", False),
+        value_model=value_model,
     )
     
     trainer = GRPOTrainer(

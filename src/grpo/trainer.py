@@ -100,12 +100,16 @@ class GRPOTrainer:
         n_unique_actions = len(set(move_indices))
         use_penalty = self.cfg.grpo.get("use_length_penalty", False)
         penalty_coef = self.cfg.grpo.get("length_penalty_coef", 0.02)
-        rewards, last_final_board = self.agent.rollout_group(
-            board_state, 
-            move_indices,
-            use_length_penalty=use_penalty,
-            length_penalty_coef=penalty_coef
-        )
+        if self.cfg.grpo.get("use_value_judge", False):
+            # v1: rollout の代わりに value net で報酬(候補手を一括GPU評価+TSS上書き)
+            rewards, last_final_board = self.agent.value_judge_rewards(board_state, move_indices)
+        else:
+            rewards, last_final_board = self.agent.rollout_group(
+                board_state,
+                move_indices,
+                use_length_penalty=use_penalty,
+                length_penalty_coef=penalty_coef
+            )
 
         if use_topk:
             advantages = compute_group_advantages(rewards, weights=aux3)
