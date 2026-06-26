@@ -19,6 +19,7 @@ class RenjuTransformerModel(nn.Module):
         activation: str,
         norm_first: bool,
         num_move_labels: int,
+        with_value_head: bool = False,
     ) -> None:
         super().__init__()
         self.max_seq_len = max_seq_len
@@ -37,15 +38,26 @@ class RenjuTransformerModel(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.final_norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, num_move_labels)
+        # value ヘッドは任意 (デフォルト無効)。無効時は既存 checkpoint/呼び出しと完全互換。
+        self.with_value_head = with_value_head
+        self.value_head = nn.Linear(d_model, 1) if with_value_head else None
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _encode(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
         if not torch.onnx.is_in_onnx_export() and seq_len > self.max_seq_len:
             raise ValueError(f"Input length {seq_len} exceeds configured max_seq_len {self.max_seq_len}.")
-
         positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, seq_len)
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
         hidden = self.embedding_dropout(hidden)
         encoded = self.encoder(hidden)
-        pooled = self.final_norm(encoded[:, -1, :])
-        return self.head(pooled)
+        return self.final_norm(encoded[:, -1, :])
+
+    def forward(self, input_ids: torch.Tensor, return_value: bool = False):
+        pooled = self._encode(input_ids)
+        logits = self.head(pooled)
+        if return_value:
+            if self.value_head is None:
+                raise RuntimeError("value head が無いモデルで return_value=True が呼ばれました。")
+            value = torch.tanh(self.value_head(pooled)).squeeze(-1)  # [-1,1], 手番側視点の勝率推定
+            return logits, value
+        return logits
