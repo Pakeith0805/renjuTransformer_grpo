@@ -271,12 +271,15 @@ def reconstruct_winning_states(start_board: list[int], path: list[int], win_play
 class GRPOAgent:
     def __init__(self, policy_model, ref_model, tokenizer, device, mcts_simulations=200,
                  use_tss_collection=False, use_tss_training=False,
-                 use_puct_collection=False, use_puct_training=False):
+                 use_puct_collection=False, use_puct_training=False,
+                 value_model=None):
         self.policy = policy_model
         self.ref = ref_model
         self.tokenizer = tokenizer
         self.device = device
         self.mcts_simulations = mcts_simulations
+        # value 判定者(任意)。与えられると rollout の代わりに value net で報酬を出せる(v1)。
+        self.value_model = value_model
         self.use_tss_collection = use_tss_collection
         self.use_tss_training = use_tss_training
         self.use_puct_collection = use_puct_collection
@@ -492,6 +495,55 @@ class GRPOAgent:
             first_player = infer_player(last_board)
             last_board[move_indices[0]] = first_player
             
+        return rewards, last_board
+
+    def value_judge_rewards(self, initial_board_state, move_indices, max_vcf_depth=12):
+        """v1: rollout の代わりに value net で各候補手を評価して報酬を返す(GPUバッチ)。
+        各手 a を打った後の局面(=相手手番)を value net で一括評価し、報酬=-value(自分視点)。
+        ただし TSS で決まる局面は exact ラベルで上書き:
+          - a が即五を作る → +1
+          - a の後に相手へ VCF 必勝が生じる → -1
+        rollout_group と同じく重複手は1回だけ評価して展開する。
+        """
+        if self.value_model is None:
+            raise RuntimeError("value_model が無い状態で value_judge_rewards が呼ばれました。")
+        lib = _get_mcts_lib()
+        player = infer_player(initial_board_state)
+        opponent = 2 if player == 1 else 1
+
+        # 重複排除
+        unique = list(dict.fromkeys(move_indices))
+        reward_of = {}
+        nn_moves, nn_boards = [], []   # value net 評価が必要な手と局面
+
+        for mv in unique:
+            next_board = board_with_move(initial_board_state, mv, player)
+            # TSS 上書き(1): 即勝ち
+            if winner_after_move(next_board, mv, player) == player:
+                reward_of[mv] = 1.0
+                continue
+            # TSS 上書き(2): 相手に VCF 必勝が生じる手は悪手
+            board_array = (ctypes.c_int * 225)(*next_board)
+            if lib.solve_vcf_c_api(board_array, opponent, max_vcf_depth) >= 0:
+                reward_of[mv] = -1.0
+                continue
+            nn_moves.append(mv)
+            nn_boards.append(next_board)
+
+        # value net 一括評価 (GPUバッチ)
+        if nn_boards:
+            batch = torch.stack([self.tokenizer.encode_input(b) for b in nn_boards]).to(self.device)
+            self.value_model.eval()
+            with torch.no_grad():
+                _, value = self.value_model(batch, return_value=True)  # 相手手番視点の勝率
+            value = value.detach().float().cpu().tolist()
+            for mv, v in zip(nn_moves, value):
+                reward_of[mv] = -float(v)   # 自分視点に反転
+
+        rewards = [reward_of[m] for m in move_indices]
+        last_board = initial_board_state.copy()
+        if move_indices:
+            last_board[move_indices[0]] = player
         return rewards, last_board
 
     def select_move_via_mcts(self, board_state, simulations=1000, temperature=1.0, use_noise=True, max_vcf_depth=12,
