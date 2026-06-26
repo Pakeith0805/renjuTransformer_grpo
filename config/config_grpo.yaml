@@ -39,3 +39,9 @@ grpo:
   use_topk_weighted: false       # true: ノイズ→top-K(π̃)列挙→π重み和（期待値版GRPO） / false: 従来のMCサンプリング
   use_value_judge: false         # true: 報酬を MCTSロールアウトでなく value net(一括GPU評価)+TSS上書きで出す(v1)
   value_judge_path: models/pretrained_value.pt  # use_value_judge=true 時に使う value ヘッド付き checkpoint
+  value_cotrain: false           # true: GRPO中に value net を自己対戦勝敗で継続学習(凍結の陳腐化を防ぐ, v1.5)。use_value_judge & use_full_game_training 前提
+  value_cotrain_lr: 0.0001       # value 共進化の学習率
+  value_cotrain_steps: 4         # 1iterあたりの value 更新ステップ数
+  value_cotrain_batch: 256       # value 更新のバッチサイズ
+  value_cotrain_every: 1         # 何iter毎に value を更新するか
+  value_buffer_size: 20000       # value 教師(局面,勝敗)のリプレイバッファ上限

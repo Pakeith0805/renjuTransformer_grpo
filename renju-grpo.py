@@ -78,8 +78,9 @@ def main(cfg: DictConfig) -> None:
     if cfg.grpo.get("use_value_judge", False):
         from grpo.load_model import load_value_model
         vpath = cfg.grpo.get("value_judge_path", "models/pretrained_value.pt")
-        print(f"Loading value judge from: {vpath}")
-        value_model = load_value_model(vpath, device)
+        cotrain = cfg.grpo.get("value_cotrain", False)
+        print(f"Loading value judge from: {vpath} (cotrain={cotrain})")
+        value_model = load_value_model(vpath, device, freeze=not cotrain)
     agent = GRPOAgent(
         policy_model=policy_model,
         ref_model=ref_model,

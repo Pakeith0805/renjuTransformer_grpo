@@ -74,6 +74,18 @@ class GRPOTrainer:
         self.agent = agent
         self.optimizer = optimizer
         self.cfg = cfg
+        # value 共進化(v1.5): value_model を自己対戦の勝敗で継続学習し、凍結判定者の陳腐化を防ぐ。
+        self.value_cotrain = bool(cfg.grpo.get("value_cotrain", False)) and (agent.value_model is not None)
+        if self.value_cotrain:
+            from collections import deque
+            vlr = cfg.grpo.get("value_cotrain_lr", 1e-4)
+            self.value_optimizer = torch.optim.AdamW(
+                [p for p in agent.value_model.parameters() if p.requires_grad],
+                lr=vlr, weight_decay=0.01,
+            )
+            self.value_buffer = deque(maxlen=int(cfg.grpo.get("value_buffer_size", 20000)))
+            self.value_loss_fn = torch.nn.MSELoss()
+            print(f"value co-train ON (lr={vlr}, buffer={self.value_buffer.maxlen})")
 
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
@@ -207,10 +219,13 @@ class GRPOTrainer:
             "vcf_p_raw": p_raw_val
         }
     
-    def collect_trajectory_boards(self) -> list[list[int]]:
+    def collect_trajectory_boards(self):
+        """全局を MCTS 自己対戦で打ち、非終局局面のリストと勝者(1/2/None)を返す。
+        勝者は value 共進化の教師に使う。決着しなければ None。"""
         board = [0] * 225
         board[112] = 1  # 1手目は天元に固定。ルールだから
         boards = [board.copy()]
+        game_winner = None
 
         max_plies = self.cfg.grpo.get("max_plies", 80)
         # 2手目以降、ゲーム終了または最大手数まで打つ
@@ -243,9 +258,34 @@ class GRPOTrainer:
             if winner is None:
                 boards.append(board.copy())
             else:
+                game_winner = winner  # current_player が勝った
                 break
 
-        return boards
+        return boards, game_winner
+
+    def update_value_model(self):
+        """value 共進化: バッファ(局面,勝敗±1)から数ステップ MSE 更新。平均lossを返す。"""
+        if not self.value_cotrain or len(self.value_buffer) < 64:
+            return None
+        steps = int(self.cfg.grpo.get("value_cotrain_steps", 4))
+        bs = int(self.cfg.grpo.get("value_cotrain_batch", 256))
+        vm = self.agent.value_model
+        tok = self.agent.tokenizer
+        dev = self.agent.device
+        vm.train()
+        total = 0.0
+        for _ in range(steps):
+            batch = random.sample(self.value_buffer, min(bs, len(self.value_buffer)))
+            input_ids = torch.stack([tok.encode_input(list(b)) for b, _ in batch]).to(dev)
+            targets = torch.tensor([t for _, t in batch], dtype=torch.float32, device=dev)
+            _, value = vm(input_ids, return_value=True)
+            loss = self.value_loss_fn(value, targets)
+            self.value_optimizer.zero_grad()
+            loss.backward()
+            self.value_optimizer.step()
+            total += loss.item()
+        vm.eval()   # 判定者として使うときは eval 固定
+        return total / steps
 
     # 損失関数を返す関数
     def compute_grpo_loss(
@@ -328,9 +368,20 @@ class GRPOTrainer:
             for iteration in progress:
                 if self.cfg.grpo.get("use_full_game_training", False):
                     # 1戦通して盤面を収集し、全盤面を1回ずつ学習するモード
-                    game_boards = self.collect_trajectory_boards()
+                    game_boards, game_winner = self.collect_trajectory_boards()
                     if not game_boards:
                         game_boards = [initial_board.copy()]
+
+                    # value 共進化(v1.5): 全局の勝敗を教師としてバッファに蓄積し value を更新
+                    value_cotrain_loss = None
+                    if self.value_cotrain and game_winner is not None:
+                        for b in game_boards:
+                            tgt = 1.0 if infer_player(b) == game_winner else -1.0
+                            self.value_buffer.append((tuple(b), tgt))
+                    if self.value_cotrain and iteration % int(self.cfg.grpo.get("value_cotrain_every", 1)) == 0:
+                        value_cotrain_loss = self.update_value_model()
+                        if value_cotrain_loss is not None:
+                            mlflow.log_metric("grpo_value_cotrain_loss", value_cotrain_loss, step=iteration)
 
                     step_metrics_list = []
                     for board_state in game_boards:
@@ -399,7 +450,7 @@ class GRPOTrainer:
                         start_board = initial_board
  
                     if iteration % 100 == 0 or not trajectory_boards:
-                        new_boards = self.collect_trajectory_boards()
+                        new_boards, _ = self.collect_trajectory_boards()
                         trajectory_boards.extend(new_boards)
  
                         if len(trajectory_boards) > 1000:

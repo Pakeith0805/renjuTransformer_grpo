@@ -79,8 +79,9 @@ def load_policy_and_reference(policy_checkpoint_path: str | Path, ref_checkpoint
 
     return policy_model, ref_model
 
-def load_value_model(value_checkpoint_path: str | Path, device: torch.device):
-    """value ヘッド付きの判定者モデルをロードして固定(eval, requires_grad=False)で返す。"""
+def load_value_model(value_checkpoint_path: str | Path, device: torch.device, freeze: bool = True):
+    """value ヘッド付きの判定者モデルをロードして返す。
+    freeze=True なら固定(requires_grad=False)。共進化(v1.5)時は freeze=False で学習可能にする。"""
     value_checkpoint_path = Path(value_checkpoint_path)
     if not value_checkpoint_path.exists():
         raise FileNotFoundError(f"Value checkpoint not found at: {value_checkpoint_path}")
@@ -94,7 +95,7 @@ def load_value_model(value_checkpoint_path: str | Path, device: torch.device):
     )
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     for p in model.parameters():
-        p.requires_grad = False
+        p.requires_grad = not freeze
     model.to(device).eval()
     return model
 
