@@ -180,6 +180,14 @@ def main():
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
     loss_fn = nn.MSELoss()
 
+    def save_checkpoint():
+        cfg = dict(config)
+        cfg["model"] = dict(config["model"])
+        cfg["model"]["with_value_head"] = True
+        out = {"model_state_dict": model.state_dict(), "config": cfg, "value_pretrain": True}
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(out, args.out)
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         te = time.time()
@@ -211,15 +219,8 @@ def main():
         print(f"epoch {epoch}/{args.epochs}  train_mse={run/max(nb,1):.4f}  "
               f"val_mse={vloss/max(vbatches,1):.4f}  val_sign_acc={agree/max(tot,1)*100:.1f}%  "
               f"({time.time()-te:.1f}s)", file=sys.stderr)
-
-    # 保存 (config に value ヘッド有を明記)
-    config = dict(config)
-    config["model"] = dict(config["model"])
-    config["model"]["with_value_head"] = True
-    out = {"model_state_dict": model.state_dict(), "config": config, "value_pretrain": True}
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(out, args.out)
-    print(f"saved -> {args.out}", file=sys.stderr)
+        save_checkpoint()   # 各エポック後に保存(途中 Ctrl-C しても直前エポックは残る)
+        print(f"  saved -> {args.out}", file=sys.stderr)
 
 
 if __name__ == "__main__":
