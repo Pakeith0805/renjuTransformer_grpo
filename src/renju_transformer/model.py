@@ -39,8 +39,18 @@ class RenjuTransformerModel(nn.Module):
         self.final_norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, num_move_labels)
         # value ヘッドは任意 (デフォルト無効)。無効時は既存 checkpoint/呼び出しと完全互換。
+        # 容量を持たせるため 1層線形でなく小さな MLP にする(凍結胴体からでも value を引き出しやすい)。
         self.with_value_head = with_value_head
-        self.value_head = nn.Linear(d_model, 1) if with_value_head else None
+        self.value_head = (
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, 1),
+            )
+            if with_value_head
+            else None
+        )
 
     def _encode(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
