@@ -85,6 +85,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-csv", default="scratchpad/mcts_vs_value_scores.csv")
     ap.add_argument("--out-png", default="scratchpad/mcts_vs_value_scores.png")
+    ap.add_argument("--perspective", choices=["black", "winner", "tomove"], default="black",
+                    help="プロット/相関の視点を固定する。"
+                         "black=常にP(黒勝ち), winner=常にP(最終勝者が勝ち), tomove=手番側(生)")
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -170,11 +173,28 @@ def main():
         r, c = divmod(move, SIDE)
         print(f"{ply:>3} {side:>4} {mcts:7.3f} {mcts_tss:9.3f} {val:7.3f}  ({r:2d},{c:2d}){'':>2} {tss:>5}")
 
-    # --- 統計: value と各 MCTS の一致度 ---
-    mc = [r[2] for r in rows]
-    mct = [r[3] for r in rows]
-    vl = [r[4] for r in rows]
     n = len(rows)
+
+    # --- 視点を固定する。生スコアは手番側視点 [0,1]。
+    # ref = 基準プレイヤー(黒 or 最終勝者)。基準が手番なら x、相手番なら 1-x にして
+    # 「常に基準プレイヤーが勝つ確率」に揃える。これで value のギザギザ(手番反転)が消えて
+    # 3者の方向の食い違いがそのまま比較できる。
+    if args.perspective == "black":
+        ref, ref_name = BLACK, "P(黒勝ち)"
+    elif args.perspective == "winner":
+        ref = BLACK if result == "black" else (WHITE if result == "white" else BLACK)
+        ref_name = f"P({'黒' if ref == BLACK else '白'}=勝者 勝ち)" if result != "draw" else "P(黒勝ち)[引分→黒]"
+    else:
+        ref, ref_name = None, "手番側の勝ちやすさ(生)"
+
+    def to_ref(x, player):
+        if ref is None or player == ref:
+            return x
+        return 1.0 - x
+
+    mc = [to_ref(r[2], r[1]) for r in rows]
+    mct = [to_ref(r[3], r[1]) for r in rows]
+    vl = [to_ref(r[4], r[1]) for r in rows]
 
     def stats(a, b):
         mae = sum(abs(x - y) for x, y in zip(a, b)) / max(len(a), 1)
@@ -188,19 +208,20 @@ def main():
 
     mae_v_m, p_v_m = stats(vl, mc)
     mae_v_t, p_v_t = stats(vl, mct)
-    print(f"\n手数={n}  決着={result}")
+    print(f"\n手数={n}  決着={result}  視点={ref_name}")
     print(f"value vs MCTS     : MAE={mae_v_m:.3f}  Pearson={p_v_m:.3f}")
     print(f"value vs MCTS+TSS : MAE={mae_v_t:.3f}  Pearson={p_v_t:.3f}  "
           f"(NN が TSS 寄りなら此方が一致)")
 
-    # --- CSV ---
+    # --- CSV (手番視点の生値 + 固定視点値の両方を残す) ---
     out_csv = PROJECT_ROOT / args.out_csv
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(out_csv, "w", encoding="utf-8") as f:
-        f.write("ply,player,mcts,mcts_tss,value,move,row,col,tss\n")
-        for ply, player, mcts, mcts_tss, val, move, tss in rows:
+        f.write("ply,player,mcts,mcts_tss,value,mcts_ref,mcts_tss_ref,value_ref,move,row,col,tss,result\n")
+        for i, (ply, player, mcts, mcts_tss, val, move, tss) in enumerate(rows):
             r, c = divmod(move, SIDE)
-            f.write(f"{ply},{player},{mcts:.4f},{mcts_tss:.4f},{val:.4f},{move},{r},{c},{tss}\n")
+            f.write(f"{ply},{player},{mcts:.4f},{mcts_tss:.4f},{val:.4f},"
+                    f"{mc[i]:.4f},{mct[i]:.4f},{vl[i]:.4f},{move},{r},{c},{tss},{result}\n")
     print(f"CSV -> {out_csv}", file=sys.stderr)
 
     # --- PNG (matplotlib があれば) ---
@@ -215,9 +236,10 @@ def main():
         ax.plot(xs, vl, "-s", ms=3, label="value net (v+1)/2", color="#d62728")
         ax.axhline(0.5, color="gray", lw=0.8, ls="--")
         ax.set_xlabel("ply (着手番号)")
-        ax.set_ylabel("手番側の勝ちやすさ [0,1]")
+        ax.set_ylabel(ref_name + " [0,1]")
         ax.set_ylim(-0.02, 1.02)
         ax.set_title(f"MCTS / MCTS+TSS / value-net (1 game, sims={args.sims}, "
+                     f"決着={result}, 視点={ref_name}, "
                      f"r(v,mcts)={p_v_m:.2f}, r(v,tss)={p_v_t:.2f})")
         ax.legend()
         ax.grid(alpha=0.3)
