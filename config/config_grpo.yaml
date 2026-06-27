@@ -45,3 +45,10 @@ grpo:
   value_cotrain_batch: 256       # value 更新のバッチサイズ
   value_cotrain_every: 1         # 何iter毎に value を更新するか
   value_buffer_size: 20000       # value 教師(局面,勝敗)のリプレイバッファ上限
+  # --- TSS(VCF)模倣の定点観測 (value_judge+TSS で「TSS模倣」を狙う実験の成功指標) ---
+  tss_imitation_eval: false      # true: 学習中の policy が探索なしでオラクル手を当てる率を反復毎に測り mlflow へ
+  tss_imitation_eval_every: 50   # 何iter毎に模倣率を測るか(初回は start_iteration でも測る)
+  tss_imitation_per_category: 100  # 模倣テストの1カテゴリあたり盤面数(固定ケース集合, 反復間で同一)
+  tss_imitation_source: template   # template=型生成 / random=自然局面(オラクル選別)
+  tss_imitation_depth: 12        # VCF オラクルの探索深さ
+  tss_imitation_seed: 0          # 固定ケース生成のシード

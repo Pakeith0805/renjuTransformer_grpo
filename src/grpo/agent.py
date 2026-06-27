@@ -501,6 +501,7 @@ class GRPOAgent:
         """v1: rollout の代わりに value net で各候補手を評価して報酬を返す(GPUバッチ)。
         各手 a を打った後の局面(=相手手番)を value net で一括評価し、報酬=-value(自分視点)。
         ただし TSS で決まる局面は exact ラベルで上書き:
+          - a が自分の VCF 必勝の初手 → +1 (TSS模倣ターゲット)
           - a が即五を作る → +1
           - a の後に相手へ VCF 必勝が生じる → -1
         rollout_group と同じく重複手は1回だけ評価して展開する。
@@ -511,12 +512,23 @@ class GRPOAgent:
         player = infer_player(initial_board_state)
         opponent = 2 if player == 1 else 1
 
+        # TSS 模倣の核: 現局面に自分の VCF 必勝があれば、その「初手」を最良手として +1 で推す。
+        # solve_vcf は勝ち初手を1つ返す = test_tss_imitation のオラクルと同じ解なので、
+        # 報酬の最良手と模倣メトリクスのターゲットが一致する(これが無いと模倣は氷河的にしか進まない)。
+        # 候補ごとでなく初期局面で1回だけ呼ぶ(安い)。
+        init_array = (ctypes.c_int * 225)(*initial_board_state)
+        own_vcf_move = lib.solve_vcf_c_api(init_array, player, max_vcf_depth)
+
         # 重複排除
         unique = list(dict.fromkeys(move_indices))
         reward_of = {}
         nn_moves, nn_boards = [], []   # value net 評価が必要な手と局面
 
         for mv in unique:
+            # TSS 上書き(0): 自分の VCF 必勝の初手 → +1 (最優先=模倣ターゲット)
+            if own_vcf_move >= 0 and mv == own_vcf_move:
+                reward_of[mv] = 1.0
+                continue
             next_board = board_with_move(initial_board_state, mv, player)
             # TSS 上書き(1): 即勝ち
             if winner_after_move(next_board, mv, player) == player:

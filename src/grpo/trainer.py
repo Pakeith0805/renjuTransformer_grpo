@@ -87,6 +87,36 @@ class GRPOTrainer:
             self.value_loss_fn = torch.nn.MSELoss()
             print(f"value co-train ON (lr={vlr}, buffer={self.value_buffer.maxlen})")
 
+        # TSS(VCF)模倣の定点観測: 学習中の policy が探索なしでオラクル手をどれだけ当てるかを反復毎に追う。
+        # 固定ケース集合を1回だけ作り反復間で比較可能にする(value_judge+TSS で模倣を狙う実験の成功指標)。
+        self.tss_imit_eval = bool(cfg.grpo.get("tss_imitation_eval", False))
+        self.tss_imit_cases = None  # 遅延構築(初回 eval 時に作る)
+        if self.tss_imit_eval:
+            print(f"TSS imitation eval ON (every {int(cfg.grpo.get('tss_imitation_eval_every', 50))} iters)")
+
+    def _tss_imitation_eval(self, iteration):
+        """現 policy の TSS(VCF)模倣率(探索なし masked-argmax がオラクル手と一致する率)を測り mlflow へ。"""
+        import sys
+        scripts_dir = str(Path(__file__).resolve().parent.parent.parent / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from test_tss_imitation import build_imitation_cases, score_imitation
+        if self.tss_imit_cases is None:
+            self.tss_imit_cases = build_imitation_cases(
+                source=self.cfg.grpo.get("tss_imitation_source", "template"),
+                per_category=int(self.cfg.grpo.get("tss_imitation_per_category", 100)),
+                depth=int(self.cfg.grpo.get("tss_imitation_depth", 12)),
+                seed=int(self.cfg.grpo.get("tss_imitation_seed", 0)),
+            )
+            print(f"TSS imitation eval: {len(self.tss_imit_cases)} 固定ケースを構築")
+        overall, per_cat = score_imitation(
+            self.agent.policy, self.agent.tokenizer, self.tss_imit_cases, self.agent.device)
+        mlflow.log_metric("tss_imitation_top1", overall * 100, step=iteration)
+        for cat, acc in per_cat.items():
+            mlflow.log_metric(f"tss_imitation_{cat}", acc * 100, step=iteration)
+        cats = "  ".join(f"{c}={a*100:.1f}%" for c, a in per_cat.items())
+        print(f"[Iteration {iteration}] TSS imitation top1={overall*100:.1f}%  ({cats})")
+
     def train_step(self, board_state, beta: float = 0.04, clip_eps: float = 0.2):
         # 1回目のアクションと対数確率をとってくる
         vcf_target_prob = self.cfg.grpo.get("vcf_target_prob", 0.4)
@@ -561,6 +591,13 @@ class GRPOTrainer:
                     mlflow.log_metric("versus_ref_win_rate_temp0", eval_results_temp0["ref_win_rate"], step=iteration)
                     mlflow.log_metric("versus_draw_rate_temp0", eval_results_temp0["draw_rate"], step=iteration)
                     mlflow.log_metric("versus_avg_plies_temp0", eval_results_temp0["avg_plies"], step=iteration)
+
+                # TSS(VCF)模倣率の定点観測(有効時のみ。これが value_judge+TSS 実験の成功指標)
+                if self.tss_imit_eval and (
+                    iteration == start_iteration
+                    or iteration % int(self.cfg.grpo.get("tss_imitation_eval_every", 50)) == 0
+                ):
+                    self._tss_imitation_eval(iteration)
 
     def evaluate_versus(self, num_games=10, temperature=1.0) -> dict:
         """現在のポリシーと事前学習済み（Reference）モデルとの対局シミュレーションを行い、勝率を測定します"""

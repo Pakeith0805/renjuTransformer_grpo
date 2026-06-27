@@ -370,6 +370,44 @@ def print_board(board):
 
 
 # --------------------------------------------------------------------------- #
+# 学習中の定点観測用 API (trainer から import して使う)
+# --------------------------------------------------------------------------- #
+def build_imitation_cases(source="template", per_category=100, depth=12, seed=0, kmin=8, kmax=30):
+    """固定の評価ケース集合を1回だけ作る。反復間で同じ集合を使えば模倣率が比較可能になる。"""
+    rng = random.Random(seed)
+    if source == "random":
+        return collect_random_cases(rng, depth, per_category, kmin, kmax)
+    return collect_template_cases(rng, depth, per_category)
+
+
+def score_imitation(model, tokenizer, cases, device):
+    """in-memory の policy を採点。戻り値: (overall_top1, per_category_dict)。
+    model の train/eval 状態は呼び出し前に戻す(学習を壊さない)。"""
+    categories = []
+    for c in cases:
+        if c["cat"] not in categories:
+            categories.append(c["cat"])
+    agg = {cat: [0, 0] for cat in categories}  # n, top1_hits
+    was_training = model.training
+    model.eval()
+    try:
+        for case in cases:
+            cat, board, ans = case["cat"], case["board"], case["answer"]
+            pred, _ = predict(model, tokenizer, board, device)
+            a = agg[cat]
+            a[0] += 1
+            a[1] += int(pred == ans)
+    finally:
+        if was_training:
+            model.train()
+    tot_n = sum(agg[c][0] for c in categories)
+    tot_h = sum(agg[c][1] for c in categories)
+    overall = (tot_h / tot_n) if tot_n else float("nan")
+    per_cat = {c: (agg[c][1] / agg[c][0] if agg[c][0] else float("nan")) for c in categories}
+    return overall, per_cat
+
+
+# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 def main():
