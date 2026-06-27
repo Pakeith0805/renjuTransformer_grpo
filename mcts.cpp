@@ -42,7 +42,12 @@ double g_length_penalty_coef = 0.02;
 // 要素数225の整数配列にboardという名前をつけている。usingは別名定義(型エイリアス)
 //std::arrayは固定長配列の定義。
 //<要素の型, 要素数>
-using Board = std::array<int, BOARD_CELLS>; 
+using Board = std::array<int, BOARD_CELLS>;
+
+// 診断用: 葉評価をロールアウトでなく value net に差し替えるコールバック。
+// 引数: 盤面(225 int), 手番(1/2)。戻り値: [-1,1] の手番側勝率推定。nullptr なら従来のロールアウト。
+typedef double (*ValueFn)(const int*, int);
+ValueFn g_value_fn = nullptr;
 
 // 方向を表すタプルのリスト。固定値。
 const std::array<std::pair<int, int>, 4> DIRECTIONS = {
@@ -772,6 +777,19 @@ int run_mcts(const Board& board, int player, const Options& options, const std::
         int rollout_steps = 0;
         if (node->is_terminal()) {
             winner = node->terminal_winner;
+        } else if (g_value_fn != nullptr) {
+            // value net 葉評価: [-1,1](手番側視点) → root視点の[0,1] score に変換し、
+            // 既存のロールアウトと同じく全ノードへ backprop する。
+            double v = g_value_fn(node->board.data(), node->player_to_move);
+            if (v > 1.0) v = 1.0;
+            else if (v < -1.0) v = -1.0;
+            const double p_leaf = (v + 1.0) * 0.5;  // 手番側の勝率[0,1]
+            const double score_root =
+                (node->player_to_move == root.root_player) ? p_leaf : (1.0 - p_leaf);
+            for (MCTSNode* n = node; n != nullptr; n = n->parent) {
+                n->update(score_root);
+            }
+            continue;  // この simulation はここで完了 (以降のロールアウト用 backprop はスキップ)
         } else {
             winner = rollout(node->board, node->player_to_move, options, rng, rollout_steps);
         }
@@ -1870,6 +1888,16 @@ extern "C" {
     DLL_EXPORT void set_length_penalty_c_api(int use_penalty, double coef) {
         g_use_length_penalty = (use_penalty != 0);
         g_length_penalty_coef = coef;
+    }
+
+    // 診断用: 葉評価を value net コールバックに切替/解除。
+    // set 後は run_mcts の葉がロールアウトでなく fn を呼ぶ。clear で従来に戻る。
+    // 注意: コールバックは Python を呼ぶので、シングルスレッドで使うこと。
+    DLL_EXPORT void set_value_fn_c_api(ValueFn fn) {
+        g_value_fn = fn;
+    }
+    DLL_EXPORT void clear_value_fn_c_api() {
+        g_value_fn = nullptr;
     }
 }
 
