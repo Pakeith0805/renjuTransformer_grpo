@@ -86,6 +86,38 @@ def oracle(board, depth):
     return None, -1
 
 
+def block_defense_set(board, depth):
+    """相手VCFを消す自分の合法手の集合(=有効な受け全部)。学習側の受け基準
+    `solve_vcf(自分が打った後の盤, 相手) < 0` と同一述語。空集合なら受け不能(=その局面は不採用)。
+    集合メンバーシップ採点用: pred がこの集合に入れば正解(オラクルの1手縛りをやめる)。"""
+    me = infer_player(board)
+    opp = WHITE if me == BLACK else BLACK
+    s = set()
+    legal = legal_move_mask(board)
+    for mv in range(225):
+        if not legal[mv]:
+            continue
+        nb = list(board)
+        nb[mv] = me
+        if vcf(nb, opp, depth) < 0:   # 自分が mv を打つと相手VCFが消える = 有効な受け
+            s.add(mv)
+    return s
+
+
+def case_correct(case, pred, probs):
+    """1ケースの (正解か, 正解への確率質量) を返す。
+    block は集合メンバーシップ(正解集合のどれかなら正解)、attack は単一手一致。"""
+    if case.get("kind") == "block":
+        cs = case["correct_set"]
+        ok = int(pred in cs)
+        pmass = float(sum(probs[m].item() for m in cs)) if cs else 0.0
+    else:
+        ans = case["answer"]
+        ok = int(pred == ans)
+        pmass = float(probs[ans].item())
+    return ok, pmass
+
+
 # --------------------------------------------------------------------------- #
 # 盤面ヘルパ
 # --------------------------------------------------------------------------- #
@@ -283,8 +315,15 @@ def collect_template_cases(rng, depth, per_category):
             if c is None:
                 fails += 1
                 continue
-            cases.append(dict(cat=cat, board=c["board"], answer=c["answer"],
-                              distractor=c["distractor"], kind=c["oracle_kind"]))
+            case = dict(cat=cat, board=c["board"], answer=c["answer"],
+                        distractor=c["distractor"], kind=c["oracle_kind"])
+            if c["oracle_kind"] == "block":
+                cs = block_defense_set(c["board"], depth)  # 有効な受け全部(集合採点)
+                if not cs:
+                    fails += 1
+                    continue  # 受け不能=不採用
+                case["correct_set"] = cs
+            cases.append(case)
             made += 1
         if made < per_category:
             print(f"[warn] {cat}: {made}/{per_category} 盤面のみ生成", file=sys.stderr)
@@ -323,9 +362,15 @@ def collect_random_cases(rng, depth, per_category, kmin, kmax):
             continue
         if kind is None or mv < 0 or not legal_move_mask(board)[mv]:
             continue
-        if len(buckets[kind]) < per_category:
-            buckets[kind].append(dict(cat=kind, board=board, answer=mv,
-                                      distractor=set(), kind=kind))
+        if len(buckets[kind]) >= per_category:
+            continue
+        case = dict(cat=kind, board=board, answer=mv, distractor=set(), kind=kind)
+        if kind == "block":
+            cs = block_defense_set(board, depth)  # 有効な受け全部(集合採点)
+            if not cs:
+                continue  # 受け不能=不採用
+            case["correct_set"] = cs
+        buckets[kind].append(case)
     for k in buckets:
         if len(buckets[k]) < per_category:
             print(f"[warn] random {k}: {len(buckets[k])}/{per_category} のみ採用(自然局面では稀)",
@@ -392,11 +437,11 @@ def score_imitation(model, tokenizer, cases, device):
     model.eval()
     try:
         for case in cases:
-            cat, board, ans = case["cat"], case["board"], case["answer"]
-            pred, _ = predict(model, tokenizer, board, device)
-            a = agg[cat]
+            pred, probs = predict(model, tokenizer, case["board"], device)
+            ok, _ = case_correct(case, pred, probs)  # block=集合メンバーシップ/attack=単一手
+            a = agg[case["cat"]]
             a[0] += 1
-            a[1] += int(pred == ans)
+            a[1] += ok
     finally:
         if was_training:
             model.train()
@@ -462,13 +507,13 @@ def main():
             shown[cat] += 1
         for lab, model in models.items():
             pred, probs = predict(model, tokenizer, board, device)
+            ok, pmass = case_correct(case, pred, probs)   # block=集合メンバーシップ/attack=単一手
             a = agg[lab][cat]
             a[0] += 1
-            a[1] += int(pred == ans)
-            a[2] += float(probs[ans].item())
+            a[1] += ok
+            a[2] += pmass
             a[3] += int(pred in distr)
-            rows.append((lab, cat, ans, pred, int(pred == ans),
-                         round(float(probs[ans].item()), 4), int(pred in distr)))
+            rows.append((lab, cat, ans, pred, ok, round(pmass, 4), int(pred in distr)))
 
     # ---- レポート ----
     print("\n" + "=" * 72)
