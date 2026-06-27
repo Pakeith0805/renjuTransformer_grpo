@@ -20,6 +20,8 @@ class RenjuTransformerModel(nn.Module):
         norm_first: bool,
         num_move_labels: int,
         with_value_head: bool = False,
+        value_head_layers: int = 2,
+        value_head_hidden: int = 0,
     ) -> None:
         super().__init__()
         self.max_seq_len = max_seq_len
@@ -39,18 +41,20 @@ class RenjuTransformerModel(nn.Module):
         self.final_norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, num_move_labels)
         # value ヘッドは任意 (デフォルト無効)。無効時は既存 checkpoint/呼び出しと完全互換。
-        # 容量を持たせるため 1層線形でなく小さな MLP にする(凍結胴体からでも value を引き出しやすい)。
+        # 層数(value_head_layers)と幅(value_head_hidden, 0でd_model)を可変にして容量を調整できる。
+        # value_head_layers=2, hidden=d_model がデフォルトで従来と同一構成。
         self.with_value_head = with_value_head
-        self.value_head = (
-            nn.Sequential(
-                nn.Linear(d_model, d_model),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(d_model, 1),
-            )
-            if with_value_head
-            else None
-        )
+        if with_value_head:
+            hidden = value_head_hidden if value_head_hidden > 0 else d_model
+            layers: list[nn.Module] = []
+            in_dim = d_model
+            for _ in range(max(1, value_head_layers) - 1):
+                layers += [nn.Linear(in_dim, hidden), nn.GELU(), nn.Dropout(dropout)]
+                in_dim = hidden
+            layers += [nn.Linear(in_dim, 1)]
+            self.value_head = nn.Sequential(*layers)
+        else:
+            self.value_head = None
 
     def _encode(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape

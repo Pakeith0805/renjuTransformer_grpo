@@ -122,7 +122,7 @@ class ValueDataset(Dataset):
 # --------------------------------------------------------------------------- #
 # モデル
 # --------------------------------------------------------------------------- #
-def build_model_with_value(pretrained_path, device):
+def build_model_with_value(pretrained_path, device, head_layers=2, head_hidden=0):
     ckpt = torch.load(pretrained_path, map_location="cpu", weights_only=False)
     mc = ckpt["config"]["model"]
     model = RenjuTransformerModel(
@@ -130,6 +130,7 @@ def build_model_with_value(pretrained_path, device):
         nhead=mc["nhead"], num_layers=mc["num_layers"], dim_feedforward=mc["dim_feedforward"],
         dropout=mc["dropout"], activation=mc["activation"], norm_first=mc["norm_first"],
         num_move_labels=mc["num_move_labels"], with_value_head=True,
+        value_head_layers=head_layers, value_head_hidden=head_hidden,
     )
     # policy 重みをロード (value_head は新規なので strict=False で OK)
     missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
@@ -148,6 +149,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--freeze-body", action="store_true", help="胴体を凍結し value ヘッドだけ学習")
+    ap.add_argument("--value-head-layers", type=int, default=2, help="value ヘッドの層数(容量実験用)")
+    ap.add_argument("--value-head-hidden", type=int, default=0, help="value ヘッドの隠れ幅(0=d_model)")
     ap.add_argument("--val-frac", type=float, default=0.02, help="検証に回す割合")
     ap.add_argument("--max-games", type=int, default=None, help="動作確認用に対局数を制限")
     ap.add_argument("--seed", type=int, default=42)
@@ -171,7 +174,9 @@ def main():
     tr_loader = DataLoader(tr, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     va_loader = DataLoader(va, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    model, config = build_model_with_value(args.pretrained, device)
+    model, config = build_model_with_value(
+        args.pretrained, device, head_layers=args.value_head_layers, head_hidden=args.value_head_hidden)
+    print(f"value head: layers={args.value_head_layers} hidden={args.value_head_hidden or 'd_model'}", file=sys.stderr)
 
     if args.freeze_body:
         for name, p in model.named_parameters():
@@ -184,6 +189,8 @@ def main():
         cfg = dict(config)
         cfg["model"] = dict(config["model"])
         cfg["model"]["with_value_head"] = True
+        cfg["model"]["value_head_layers"] = args.value_head_layers
+        cfg["model"]["value_head_hidden"] = args.value_head_hidden
         out = {"model_state_dict": model.state_dict(), "config": cfg, "value_pretrain": True}
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         torch.save(out, args.out)
