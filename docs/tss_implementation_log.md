@@ -123,4 +123,17 @@ Allis 博士論文 "Searching for Solutions in Games and Artificial Intelligence
 - 関連: 被覆拡大の議論で「四三フォークは既にVCFが拾う／Tier1の新規被覆は三三(白)のみで僅少／
   本命は VCT」と確認済み。`-value` 報酬の侵食対策（grpo.beta↑）とは独立に進める。
 
+### 2026-06-28 — P0 実装（防御カウンター修正）
+- `mcts.cpp` にヘルパ `defender_has_immediate_win(board, defender)` を追加。
+- `solve_vcf_recursive` と `solve_vcf_recursive_path` の「攻めの四を置いた直後」に挿入:
+  **防御側に即五があれば `continue`**（防御側はブロックせず自分の五で勝つ＝その四は必勝を強制しない）。
+  win_squares 判定より前に置く（達四 win_squares>=2 でも防御側の即五が優先するため）。
+- 設計根拠: 防御側の逃げ筋は「即五を持つ」場合だけ（持たなければ五点を受けるしかない＝既存ロジックで健全）。
+  ブロックがカウンター四を作り次手で防御側に即五が生じる枝も、**次の攻めノードで同チェックが効くので
+  再帰的に除外される**。よって false negative（本物の必勝の取りこぼし）は生まない
+  （別の四が防御の四も止めるなら、その四は別 threat_move として通常通り探索される）。
+- 旧 `winner_after_move(block_move, opponent)==opponent` チェックは本修正に包含され冗長化（無害なので残置）。
+- 性能: 1 threat_move あたり相手即五スキャン(225)が増え、概ね探索コスト ~2倍。正確性優先で許容。後で近傍限定など最適化余地。
+- **状態: ローカルでコンパイル不可 → リモート再ビルド + `verify_tss_soundness.py` で false_positive=0 を要確認**（未検証）。
+
 ### （以後追記）

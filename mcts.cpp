@@ -1297,6 +1297,20 @@ bool creates_four_threat(const Board& board, int move, int player) {
     return false;
 }
 
+// 防御カウンター修正(P0)用ヘルパ:
+// 攻めが四を打った直後の局面で、手番である防御側(defender)に「即五」があるか。
+// 在れば防御側は攻めの四をブロックせず自分の五を打って勝つ ＝ その四は必勝を強制しない。
+// これを四ごとに弾くことで、ブロックがカウンター四を作り後続で防御側に即五が生じる枝も
+// 再帰的に(次の攻めノードのこのチェックで)正しく除外できる。
+bool defender_has_immediate_win(const Board& board, int defender) {
+    for (int sq = 0; sq < BOARD_CELLS; ++sq) {
+        if (is_winning_move(board, sq, defender)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
     if (++node_count > 200000) {
         return -1; // 20万ノードで強制打ち切り
@@ -1328,6 +1342,14 @@ int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
     for (int move : threat_moves) {
         // 攻撃側の石を置く
         board[static_cast<std::size_t>(move)] = player;
+
+        // 防御カウンター修正(P0): 四を打った直後の手番は防御側。防御側に即五があれば
+        // ブロックせず自分の五で勝つ → この四は必勝を強制しない。win_squares 判定より前に弾く
+        // (達四 win_squares>=2 でも、防御側が先に五を打てば負けるため此処で除外する必要がある)。
+        if (defender_has_immediate_win(board, opponent)) {
+            board[static_cast<std::size_t>(move)] = EMPTY; // undo
+            continue;
+        }
 
         // 次のターンで攻撃側が即勝利（五連）できる空きマスをカウント
         std::vector<int> win_squares;
@@ -1416,6 +1438,13 @@ int solve_vcf_recursive_path(Board& board, int player, int depth, int& node_coun
     for (int move : threat_moves) {
         // 攻撃側の石を置く
         board[static_cast<std::size_t>(move)] = player;
+
+        // 防御カウンター修正(P0): solve_vcf_recursive と同一。防御側に即五があれば
+        // その四は必勝を強制しない(防御側が先に五を打つ)。win_squares 判定より前に弾く。
+        if (defender_has_immediate_win(board, opponent)) {
+            board[static_cast<std::size_t>(move)] = EMPTY; // undo
+            continue;
+        }
 
         // 次のターンで攻撃側が即勝利（五連）できる空きマスをカウント
         std::vector<int> win_squares;
