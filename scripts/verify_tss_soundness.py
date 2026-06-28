@@ -22,6 +22,7 @@ TSS ソルバーの健全性検証器（偽陽性ハンター）
   （現行 VCF を検証。--depth は VCF 探索深さ、--verify-depth は確認木の深さ）
 """
 import argparse
+import ctypes
 import sys
 import random
 from pathlib import Path
@@ -43,6 +44,28 @@ BLACK, WHITE = 1, 2
 
 def other(p):
     return WHITE if p == BLACK else BLACK
+
+
+_path_lib = None
+
+
+def vcf_line(board, player, depth):
+    """solve_vcf_path で solve_vcf が主張する勝ち手順(攻め→受け→攻め…)を [(r,c,'攻/受'),...] で返す。"""
+    global _path_lib
+    if _path_lib is None:
+        name = "mcts.so" if sys.platform != "win32" else "mcts.dll"
+        _path_lib = ctypes.CDLL(str(PROJECT_ROOT / name))
+        _path_lib.solve_vcf_path_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+        _path_lib.solve_vcf_path_c_api.restype = ctypes.c_int
+    arr = (ctypes.c_int * N)(*board)
+    out = (ctypes.c_int * 128)()
+    n = _path_lib.solve_vcf_path_c_api(arr, player, depth, out)
+    seq = []
+    for i in range(n):
+        mv = out[i]
+        seq.append((mv // SIDE, mv % SIDE, "攻" if i % 2 == 0 else "受"))
+    return seq
 
 
 def local_empty(board):
@@ -188,6 +211,8 @@ def main():
               f"{n_opp5}/{len(fp_examples)}")
         for k, b in enumerate(fp_examples):
             print(f"  例{k}: " + explain_fp(b, args.depth, args.verify_depth, args.budget))
+            line = vcf_line(b, infer_player(b), args.depth)
+            print("        solve_vcfの主張手順: " + " ".join(f"{t}({r},{c})" for r, c, t in line))
         b = fp_examples[0]
         print("[盤面例0] 手番=", "黒" if infer_player(b) == BLACK else "白",
               " 相手即五=", opp_immediate_five(b))
