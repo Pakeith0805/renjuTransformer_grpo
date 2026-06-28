@@ -30,7 +30,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
-from renju_transformer.rules import infer_player, winner_after_move, board_with_move, legal_move_mask
+from renju_transformer.rules import (
+    infer_player, winner_after_move, board_with_move, legal_move_mask, count_four_directions,
+)
 # ソルバーと局面生成は test_tss_imitation のものを再利用
 from test_tss_imitation import vcf as solve_vcf, gen_random_position
 
@@ -87,6 +89,34 @@ def attacker_wins(board, attacker, solver, vcf_depth, depth, budget):
         if not attacker_wins(b2, attacker, solver, vcf_depth, depth - 1, budget):
             return False                  # この防御を切れていない=逃げられた
     return True
+
+
+def explain_fp(board, vcf_depth, verify_depth, budget_n):
+    """偽陽性局面で『どの防御手で逃げられるか』と、その手の性質を特定する。
+    戻り値: 説明文字列。"""
+    attacker = infer_player(board)
+    defender = other(attacker)
+    mv = solve_vcf(board, attacker, vcf_depth)
+    if mv < 0:
+        return "再現せず(ソルバーが必勝を返さない)"
+    b1 = board_with_move(board, mv, attacker)
+    if winner_after_move(b1, mv, attacker) == attacker:
+        return "初手で即五(本物の勝ち, 再現せず)"
+    # 攻めの初手後の『攻め側の五点』(=防御の強制ブロック候補)
+    five_pts = set(i for i in range(N) if b1[i] == 0
+                   and winner_after_move(board_with_move(b1, i, attacker), i, attacker) == attacker)
+    for d in local_empty(b1):
+        b2 = board_with_move(b1, d, defender)
+        if winner_after_move(b2, d, defender) == defender:
+            continue  # 防御の即五(P0で除外済みのはず)はスキップ
+        if not attacker_wins(b2, attacker, solve_vcf, vcf_depth, verify_depth - 1, [budget_n]):
+            r, c = divmod(d, SIDE)
+            is_block = d in five_pts
+            dfour = count_four_directions(b2, d, defender)  # d で防御側が作る四の方向数
+            mr, mc = divmod(mv, SIDE)
+            return (f"逃げ手 d=({r},{c}) [強制ブロック点か={is_block}] "
+                    f"d後の防御側四方向数={dfour} / 攻め初手mv=({mr},{mc}) 五点数={len(five_pts)}")
+    return "逃げ手を再特定できず(予算/深さ依存=検証側の限界の可能性)"
 
 
 def main():
@@ -156,8 +186,10 @@ def main():
         n_opp5 = sum(1 for b in fp_examples if opp_immediate_five(b))
         print(f"\n[偽陽性 {len(fp_examples)}例の分類] 相手に即五あり(VCFが相手脅威を無視): "
               f"{n_opp5}/{len(fp_examples)}")
+        for k, b in enumerate(fp_examples):
+            print(f"  例{k}: " + explain_fp(b, args.depth, args.verify_depth, args.budget))
         b = fp_examples[0]
-        print("[例] 手番=", "黒" if infer_player(b) == BLACK else "白",
+        print("[盤面例0] 手番=", "黒" if infer_player(b) == BLACK else "白",
               " 相手即五=", opp_immediate_five(b))
         sym = {0: " .", 1: " #", 2: " O"}
         print("    " + "".join(f"{c:2d}" for c in range(SIDE)))
