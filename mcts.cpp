@@ -1944,6 +1944,10 @@ extern "C" {
     }
 
     // VCF (Victory by Continuous Fours) 探索用の C-API
+    // P1差し替え: 検証済みの新ソルバー solve_vct_recursive(fours_only=true) に委譲。
+    // 旧 solve_vcf_recursive は健全(P0後)だが ad-hoc。新実装は同被覆・偽陽性0で確認済み、
+    // かつ P2(活三=VCT) へ拡張する単一実装に統合する。全呼び出し側(報酬/eval/オラクル/推論)が
+    // この C-API 経由なので、一点差し替えで production が新ソルバーになる。
     DLL_EXPORT int solve_vcf_c_api(const int* board_array, int player, int max_depth) {
         try {
             Board board;
@@ -1951,7 +1955,7 @@ extern "C" {
                 board[i] = board_array[i];
             }
             int node_count = 0;
-            return solve_vcf_recursive(board, player, max_depth, node_count);
+            return solve_vct_recursive(board, player, max_depth, node_count, true);
         } catch (...) {
             return -1;
         }

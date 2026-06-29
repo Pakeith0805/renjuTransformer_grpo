@@ -193,4 +193,19 @@ solve_vct の“勝ち手順”終端が **「攻-相手禁手で受け不能(9,
 **教訓**: 検証器も連珠ルール(黒禁手)を完全実装しないと、正しいソルバーを誤って偽陽性と裁く。
 独立オラクル比較→Python移植→トレース→決定的チェック、の順で真因に到達できた。
 
+### 2026-06-28 — P1完了(差し替え) + P2へ
+- remote 最終確認: **`--solver vct` も `--solver vcf` も false_positive=0(120/120)**。完全性比較(--compare, 200局)
+  も **vcfのみ勝ち=0 / vctのみ勝ち=0** ＝ solve_vct は solve_vcf の同被覆・上位互換。
+- **P1差し替え**: `solve_vcf_c_api` を `solve_vct_recursive(fours_only=true)` に委譲。MCTSは内部で
+  solve_vcf を直接呼ばず TSS は Python が C-API 経由で適用するので、**一点差し替えで報酬/eval/オラクル/推論が
+  全て新ソルバーに**。旧 solve_vcf_recursive は健全(P0後)だが ad-hoc、新実装に統合。
+  - 残: `solve_vcf_path_c_api` は旧 solve_vcf_recursive_path(post-P0, 健全)のまま。path変種は P2 で solve_vct に揃える。
+- **次=P2(活三=VCT)**: solve_vct の `fours_only=false` 経路を作り込む。現状の三分岐は「全ローカル防御を試す」素朴版で
+  (a)分岐爆発 (b)conservative defender 未実装 (c)**黒禁手防御の除外が未実装**(検証器には入れたがソルバー側も必要)。
+  P2でやること:
+  1. 活三の脅威判定と cost squares(受けの集合)を定義。
+  2. **conservative defender**: 防御に cost squares を一括占有させた最防御盤で達四/二重脅威に届くか(健全・効率)。
+  3. 防御列挙は **legal_defender_moves 相当(黒禁手除外)** をC++にも。
+  4. ハーネス(--solver vct, fours_only=0版)で false_positive=0、`test_tss_imitation` 活三カテゴリで完全性を見る。
+
 ### （以後追記）
