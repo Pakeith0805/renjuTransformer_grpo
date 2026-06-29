@@ -288,12 +288,78 @@ def gen_priority(rng):
     return None
 
 
-GENERATORS = {
-    "own_four": gen_own_four,
+def gen_own_three_win(rng):
+    """VCT専用: f を打つと達四(両端開き四)が2方向同時生成 = 四なし必勝フォーク。
+    事前に四なし → VCF では -1 だが VCT では f が勝ち手。
+    白のみ生成(黒の三三禁・長連禁を回避)。"""
+    color = WHITE
+    r, c = rng.randrange(N), rng.randrange(N)
+    d = rng.choice(DIRS)
+    e = PERP[d]
+    f = (r, c)
+    # d方向: f の手前に3石。f を打つと [d_open1] W W W W [d_open2] = 達四
+    d_stones = [(f[0] - (i + 1) * d[0], f[1] - (i + 1) * d[1]) for i in range(3)]
+    d_open1 = (f[0] - 4 * d[0], f[1] - 4 * d[1])   # 達四の遠端
+    d_open2 = (f[0] + d[0],     f[1] + d[1])         # 達四の近端
+    # e方向: f の後ろに3石。f を打つと [e_open1] W W W W [e_open2] = 達四
+    e_stones = [(f[0] + (i + 1) * e[0], f[1] + (i + 1) * e[1]) for i in range(3)]
+    e_open1 = (f[0] - e[0],     f[1] - e[1])         # 達四の近端
+    e_open2 = (f[0] + 4 * e[0], f[1] + 4 * e[1])    # 達四の遠端
+
+    all_cells = d_stones + e_stones
+    need_empty = [f, d_open1, d_open2, e_open1, e_open2]
+    if not all(inb(*p) for p in all_cells + need_empty):
+        return None
+    board = [EMPTY] * 225
+    if not place(board, all_cells, color):
+        return None
+    if any(board[idx(*p)] != EMPTY for p in need_empty):
+        return None
+    return dict(board=board, to_move=color, want="attack", distractor=set())
+
+
+def gen_block_three_win(rng):
+    """VCT専用: 相手(白)が f を打つと達四2本同時 = 防御側(黒)は先に f を取るしかない。
+    VCF では相手に四なし→ 脅威なしと誤判定。VCT では受け必須。"""
+    color = BLACK   # 守り手番
+    opp   = WHITE   # 攻め手(白は禁手なし)
+    r, c = rng.randrange(N), rng.randrange(N)
+    d = rng.choice(DIRS)
+    e = PERP[d]
+    f = (r, c)
+    d_stones = [(f[0] - (i + 1) * d[0], f[1] - (i + 1) * d[1]) for i in range(3)]
+    d_open1 = (f[0] - 4 * d[0], f[1] - 4 * d[1])
+    d_open2 = (f[0] + d[0],     f[1] + d[1])
+    e_stones = [(f[0] + (i + 1) * e[0], f[1] + (i + 1) * e[1]) for i in range(3)]
+    e_open1 = (f[0] - e[0],     f[1] - e[1])
+    e_open2 = (f[0] + 4 * e[0], f[1] + 4 * e[1])
+
+    all_cells = d_stones + e_stones
+    need_empty = [f, d_open1, d_open2, e_open1, e_open2]
+    if not all(inb(*p) for p in all_cells + need_empty):
+        return None
+    board = [EMPTY] * 225
+    if not place(board, all_cells, opp):
+        return None
+    if any(board[idx(*p)] != EMPTY for p in need_empty):
+        return None
+    return dict(board=board, to_move=color, want="block", distractor=set())
+
+
+# VCF でも解けるカテゴリ(四が支配)
+GENERATORS_VCF = {
+    "own_four":   gen_own_four,
     "block_four": gen_block_four,
     "four_three": gen_four_three,
-    "priority": gen_priority,
+    "priority":   gen_priority,
 }
+# VCT でしか解けないカテゴリ(四なし・活三必勝)
+GENERATORS_VCT_ONLY = {
+    "own_three_win":   gen_own_three_win,
+    "block_three_win": gen_block_three_win,
+}
+# 全カテゴリ(VCT モード用)
+GENERATORS = {**GENERATORS_VCF, **GENERATORS_VCT_ONLY}
 
 
 def make_case(name, rng, depth, tries=200, use_vct=False):
@@ -325,8 +391,10 @@ def make_case(name, rng, depth, tries=200, use_vct=False):
 # ケース収集: template(型) と random(自然局面+オラクル選別)
 # --------------------------------------------------------------------------- #
 def collect_template_cases(rng, depth, per_category, use_vct=False):
+    # use_vct=True のとき VCT 専用カテゴリ(own_three_win/block_three_win)も含む
+    gens = GENERATORS if use_vct else GENERATORS_VCF
     cases = []
-    for cat in GENERATORS:
+    for cat in gens:
         made, fails = 0, 0
         while made < per_category and fails < per_category * 3 + 50:
             c = make_case(cat, rng, depth, use_vct=use_vct)
