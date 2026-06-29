@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from renju_transformer.rules import (
     infer_player, winner_after_move, board_with_move, legal_move_mask, count_four_directions,
+    is_forbidden_for_black,
 )
 # ソルバーと局面生成は test_tss_imitation のものを再利用
 from test_tss_imitation import vcf as solve_vcf, gen_random_position
@@ -104,8 +105,17 @@ def local_empty(board):
     return cands
 
 
+def legal_defender_moves(board, defender):
+    """防御側の合法手(local_empty)。黒は禁手点に受けられないので除外する(連珠ルール)。
+    黒の禁手点しか受けが無いと、防御は受け切れず攻め勝ち、を正しく扱うために必須。"""
+    cands = local_empty(board)
+    if defender == BLACK:
+        return [d for d in cands if not is_forbidden_for_black(board, d)]
+    return cands
+
+
 def attacker_wins(board, attacker, solver, vcf_depth, depth, budget):
-    """attacker 手番。solver が示す手順が「全防御に対して」強制勝ちか確認できれば True。
+    """attacker 手番。solver が示す手順が「全(合法)防御に対して」強制勝ちか確認できれば True。
     budget 枯渇/depth 切れは False（=確認不能。安全側に倒す）。"""
     if budget[0] <= 0:
         return False
@@ -119,7 +129,10 @@ def attacker_wins(board, attacker, solver, vcf_depth, depth, budget):
     if depth <= 0:
         return False
     defender = other(attacker)
-    for d in local_empty(b1):
+    legal_replies = legal_defender_moves(b1, defender)  # 黒は禁手点に受けられない
+    if not legal_replies:
+        return True                       # 合法な受けが無い=守りは受け切れない=攻め勝ち
+    for d in legal_replies:
         b2 = board_with_move(b1, d, defender)
         if winner_after_move(b2, d, defender) == defender:
             return False                  # 守りが先に五=攻めの必勝主張は偽
@@ -213,6 +226,8 @@ def bf_forced_win(board, attacker, depth, budget, fours_only=True):
             return True  # 達四/二重四 → 勝ち
         if len(W) == 1:
             d = W[0]
+            if defender == BLACK and is_forbidden_for_black(b1, d):
+                return True  # 黒は禁手点(=唯一の受け)に打てない → 受け切れず攻め勝ち
             b2 = board_with_move(b1, d, defender)
             if winner_after_move(b2, d, defender) == defender:
                 continue  # ブロックが守りの五になる(自勝ち) → m 失敗
@@ -222,7 +237,7 @@ def bf_forced_win(board, attacker, depth, budget, fours_only=True):
             if r is None:
                 saw_unknown = True
         else:
-            replies = local_empty(b1)  # 活三: 守りは複数(健全のため全ローカル)
+            replies = legal_defender_moves(b1, defender)  # 活三: 守りは複数(黒は禁手除く)
             all_win = True
             for d in replies:
                 b2 = board_with_move(b1, d, defender)
@@ -367,6 +382,7 @@ def main():
                            None: "不明(予算切れ。--bf-budget/--bf-depth 調整)"}[res]
                 print(f"        [総当たり裁定] {verdict}")
         b = fp_examples[0]
+        print("BOARD_CSV:" + ",".join(map(str, b)))
         print("[盤面例0] 手番=", "黒" if infer_player(b) == BLACK else "白",
               " 相手即五=", opp_immediate_five(b))
         sym = {0: " .", 1: " #", 2: " O"}
