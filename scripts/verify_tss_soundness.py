@@ -142,6 +142,39 @@ def explain_fp(board, vcf_depth, verify_depth, budget_n):
     return "逃げ手を再特定できず(予算/深さ依存=検証側の限界の可能性)"
 
 
+def audit_line(board, depth):
+    """solve_vcf の主張手順を1手ずつ監査して、各手の性質を返す（残存FPの正体特定用）。
+    - 攻: 即五か / 完成点数(=win_squares) / 終端か
+    - 受: 攻の完成点数 / 防御側に即五があるか / 受けが唯一強制か
+    全『受』が唯一強制 かつ 終端の『攻』が本物勝ち(完成点>=2 or 即五) なら solve_vcf は正しく、
+    検証器のアーティファクト。逆なら solve_vcf の実バグ。"""
+    attacker = infer_player(board)
+    defender = other(attacker)
+    line = vcf_line(board, attacker, depth)
+    b = list(board)
+    out = []
+    for i, (r, c, role) in enumerate(line):
+        mv = r * SIDE + c
+        if role == "攻":
+            b_after = board_with_move(b, mv, attacker)
+            five = winner_after_move(b_after, mv, attacker) == attacker
+            wsq = sum(1 for s in range(N) if b_after[s] == 0
+                      and winner_after_move(board_with_move(b_after, s, attacker), s, attacker) == attacker)
+            tag = " <terminal>" if i == len(line) - 1 else ""
+            out.append(f"  攻({r},{c}) 即五={five} 完成点数={wsq}{tag}")
+            b = b_after
+        else:
+            comp = [s for s in range(N) if b[s] == 0
+                    and winner_after_move(board_with_move(b, s, attacker), s, attacker) == attacker]
+            dfive = any(b[s] == 0
+                        and winner_after_move(board_with_move(b, s, defender), s, defender) == defender
+                        for s in range(N))
+            unique = (len(comp) == 1 and not dfive)
+            out.append(f"  受({r},{c}) 攻の完成点数={len(comp)} 防御側即五={dfive} 唯一強制={unique}")
+            b = board_with_move(b, mv, defender)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--positions", type=int, default=100, help="検証する『必勝』局面の目標数")
@@ -213,6 +246,9 @@ def main():
             print(f"  例{k}: " + explain_fp(b, args.depth, args.verify_depth, args.budget))
             line = vcf_line(b, infer_player(b), args.depth)
             print("        solve_vcfの主張手順: " + " ".join(f"{t}({r},{c})" for r, c, t in line))
+            print("        [手順監査]")
+            for ln in audit_line(b, args.depth):
+                print("      " + ln)
         b = fp_examples[0]
         print("[盤面例0] 手番=", "黒" if infer_player(b) == BLACK else "白",
               " 相手即五=", opp_immediate_five(b))
