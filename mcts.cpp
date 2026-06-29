@@ -1406,6 +1406,113 @@ int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
     return -1;
 }
 
+// ============================================================
+// P1: 原論文準拠TSSへの作り直し。まず「正しい四VCF」を、検証済みの Python 参照実装
+// bf_forced_win(fours-only, verify_tss_soundness.py) から忠実移植する。
+//   - 旧 solve_vcf_recursive は ~0.8% 偽陽性が残る(総当たりオラクルで実バグと確定)。
+//   - 本実装は防御モデルを正しく: 攻めの四を打った後の五完成点 W で分岐
+//       守りに即五 → 守り勝ち(m失敗) / |W|>=2 → 達四・二重四=勝ち /
+//       |W|==1 → 守りは強制ブロック(単一分岐)→再帰
+//   - fours_only=false で活三も脅威に(VCT)。受けが複数なので全ローカル防御に勝てれば勝ち(P2で精緻化)。
+// 戻り: 必勝の初手 index / 無ければ -1。健全(偽陽性0)を最優先(予算切れ・depth切れは -1)。
+// ============================================================
+int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bool fours_only) {
+    if (++node_count > 200000) {
+        return -1; // 予算切れは -1(取りこぼし側=健全)
+    }
+    const int opponent = other_player(player);
+    std::vector<int> cands = neighbor_candidates(board, 2);
+
+    // 攻めに即五があれば即勝ち
+    for (int m : cands) {
+        if (is_winning_move(board, m, player)) {
+            return m;
+        }
+    }
+    if (depth <= 0) {
+        return -1;
+    }
+
+    for (int m : cands) {
+        if (board[static_cast<std::size_t>(m)] != EMPTY) {
+            continue;
+        }
+        board[static_cast<std::size_t>(m)] = player;
+
+        // 攻めの五完成点 W (= m を打った後、次に1手で五になる空きマス)
+        std::vector<int> W;
+        for (int s = 0; s < BOARD_CELLS; ++s) {
+            if (is_winning_move(board, s, player)) {
+                W.push_back(s);
+            }
+        }
+        const bool is_four = !W.empty();
+        const bool is_three = (!is_four && !fours_only
+                               && count_open_three_directions(board, m, player) >= 1);
+        if (!is_four && !is_three) {
+            board[static_cast<std::size_t>(m)] = EMPTY;
+            continue; // 脅威手でない
+        }
+
+        // 防御側に即五 → 守りはブロックせず自分の五で勝つ ＝ この攻めは不成立
+        if (defender_has_immediate_win(board, opponent)) {
+            board[static_cast<std::size_t>(m)] = EMPTY;
+            continue;
+        }
+
+        if (is_four) {
+            if (W.size() >= 2) { // 達四/二重四 = 勝ち
+                board[static_cast<std::size_t>(m)] = EMPTY;
+                return m;
+            }
+            // |W| == 1: 守りはその1点を強制ブロック
+            const int blk = W[0];
+            if (opponent == BLACK && is_forbidden_for_black(board, blk)) {
+                board[static_cast<std::size_t>(m)] = EMPTY;
+                return m; // 守りは禁手で受けられない = 攻め勝ち
+            }
+            board[static_cast<std::size_t>(blk)] = opponent;
+            if (winner_after_move(board, blk, opponent) == opponent) {
+                board[static_cast<std::size_t>(blk)] = EMPTY;
+                board[static_cast<std::size_t>(m)] = EMPTY;
+                continue; // ブロックが守りの五になる(自勝ち) → m 失敗
+            }
+            const int r = solve_vct_recursive(board, player, depth - 1, node_count, fours_only);
+            board[static_cast<std::size_t>(blk)] = EMPTY;
+            board[static_cast<std::size_t>(m)] = EMPTY;
+            if (r != -1) {
+                return m;
+            }
+        } else {
+            // 活三(VCT): 守りは複数。全ローカル合法手に勝てれば勝ち(健全のため超集合, P2で精緻化)
+            bool all_win = true;
+            std::vector<int> replies = neighbor_candidates(board, 2);
+            for (int d : replies) {
+                if (board[static_cast<std::size_t>(d)] != EMPTY) {
+                    continue;
+                }
+                board[static_cast<std::size_t>(d)] = opponent;
+                int r;
+                if (winner_after_move(board, d, opponent) == opponent) {
+                    r = -1; // 守りが五で勝つ
+                } else {
+                    r = solve_vct_recursive(board, player, depth - 1, node_count, fours_only);
+                }
+                board[static_cast<std::size_t>(d)] = EMPTY;
+                if (r == -1) {
+                    all_win = false;
+                    break;
+                }
+            }
+            board[static_cast<std::size_t>(m)] = EMPTY;
+            if (all_win) {
+                return m;
+            }
+        }
+    }
+    return -1;
+}
+
 int solve_vcf_recursive_path(Board& board, int player, int depth, int& node_count, std::vector<int>& path) {
     if (++node_count > 200000) {
         return -1; // 20万ノードで強制打ち切り
@@ -1845,6 +1952,21 @@ extern "C" {
             }
             int node_count = 0;
             return solve_vcf_recursive(board, player, max_depth, node_count);
+        } catch (...) {
+            return -1;
+        }
+    }
+
+    // P1: 原論文準拠TSSの新ソルバー C-API (検証済みオラクルからの移植)。
+    // fours_only != 0 で四のみ(=正しいVCF, 旧solve_vcfの置換候補)。0 で活三も(VCT)。
+    DLL_EXPORT int solve_vct_c_api(const int* board_array, int player, int max_depth, int fours_only) {
+        try {
+            Board board;
+            for (std::size_t i = 0; i < BOARD_CELLS; ++i) {
+                board[i] = board_array[i];
+            }
+            int node_count = 0;
+            return solve_vct_recursive(board, player, max_depth, node_count, fours_only != 0);
         } catch (...) {
             return -1;
         }

@@ -47,6 +47,20 @@ def other(p):
 
 
 _path_lib = None
+_vct_lib = None
+
+
+def solve_vct(board, player, depth):
+    """P1新ソルバー solve_vct_c_api(fours_only=1=正しいVCF) のラッパ。再ビルド後のdllが必要。"""
+    global _vct_lib
+    if _vct_lib is None:
+        name = "mcts.so" if sys.platform != "win32" else "mcts.dll"
+        _vct_lib = ctypes.CDLL(str(PROJECT_ROOT / name))
+        _vct_lib.solve_vct_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        _vct_lib.solve_vct_c_api.restype = ctypes.c_int
+    arr = (ctypes.c_int * N)(*board)
+    return _vct_lib.solve_vct_c_api(arr, player, depth, 1)
 
 
 def vcf_line(board, player, depth):
@@ -277,10 +291,13 @@ def main():
     ap.add_argument("--bf-budget", type=int, default=2000000, help="総当たりオラクルのノード上限")
     ap.add_argument("--bf-with-threes", action="store_true",
                     help="総当たりオラクルに活三も含める(VCT用・重い)。既定は四のみ(VCF裁定=高速)")
+    ap.add_argument("--solver", choices=["vcf", "vct"], default="vcf",
+                    help="検証するソルバー。vct=P1新実装(solve_vct_c_api, 要再ビルド)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    solver = solve_vcf
+    solver = solve_vct if args.solver == "vct" else solve_vcf
+    print(f"検証対象ソルバー: {args.solver}", file=sys.stderr)
 
     verified = false_positive = unconfirmed = 0
     checked = 0
