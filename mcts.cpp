@@ -1416,6 +1416,26 @@ int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
 //   - fours_only=false で活三も脅威に(VCT)。受けが複数なので全ローカル防御に勝てれば勝ち(P2で精緻化)。
 // 戻り: 必勝の初手 index / 無ければ -1。健全(偽陽性0)を最優先(予算切れ・depth切れは -1)。
 // ============================================================
+// 石 p を置いた後に「攻めが次に1手で五を作れる空きマス(五完成点)」を out に集める。
+// 三分岐に入る時点で攻めに即五は無いので、p 後に新たに出来る五完成点は必ず p を含む五=
+// p と同一ライン(縦横斜め4方向)・距離4以内にしか存在しない(幾何学的に取りこぼし0%, 最大32マス)。
+inline void five_completions_local(const Board& board, int p, int player, std::vector<int>& out) {
+    static const int DIRS4[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+    auto [pr, pc] = idx_to_rc(p);
+    for (const auto& d : DIRS4) {
+        for (int step = -4; step <= 4; ++step) {
+            if (step == 0) continue;
+            const int rr = pr + d[0] * step;
+            const int cc = pc + d[1] * step;
+            if (!inside(rr, cc)) continue;
+            const int t = rc_to_idx(rr, cc);
+            if (board[static_cast<std::size_t>(t)] == EMPTY && is_winning_move(board, t, player)) {
+                out.push_back(t);
+            }
+        }
+    }
+}
+
 int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bool fours_only,
                         int last_move = -1) {
     if (++node_count > 200000) {
@@ -1459,13 +1479,9 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
         board[static_cast<std::size_t>(m)] = player;
 
         // 攻めの五完成点 W (= m を打った後、次に1手で五になる空きマス)。
-        // 達四の端点は元の石から距離3+になりうるので、健全性のため全盤面を走査する(局所化はFPの原因だった)。
+        // m を通る4方向・距離4以内のみで取りこぼし無し(幾何学的に十分, 最大32マス)。
         std::vector<int> W;
-        for (int s = 0; s < BOARD_CELLS; ++s) {
-            if (is_winning_move(board, s, player)) {
-                W.push_back(s);
-            }
-        }
+        five_completions_local(board, m, player, W);
         const bool is_four = !W.empty();
         const bool is_three = (!is_four && !fours_only
                                && count_open_three_directions(board, m, player) >= 1);
@@ -1515,14 +1531,10 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
             for (int g : cands) {
                 if (board[static_cast<std::size_t>(g)] != EMPTY) continue;
                 board[static_cast<std::size_t>(g)] = player;
-                int fivepts = 0;
-                for (int t = 0; t < BOARD_CELLS; ++t) {  // 達四端点取りこぼし防止のため全盤面(健全性優先)
-                    if (is_winning_move(board, t, player)) {
-                        if (++fivepts >= 2) break;
-                    }
-                }
+                std::vector<int> gw;
+                five_completions_local(board, g, player, gw);  // g を通る4方向・距離4以内(取りこぼし無し)
                 board[static_cast<std::size_t>(g)] = EMPTY;
-                if (fivepts >= 2) C.push_back(g);
+                if (gw.size() >= 2) C.push_back(g);  // g で達四(>=2 五完成点)化 = cost square
             }
             if (C.empty()) {
                 board[static_cast<std::size_t>(m)] = EMPTY;
