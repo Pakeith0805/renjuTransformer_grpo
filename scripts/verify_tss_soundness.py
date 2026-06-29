@@ -149,13 +149,15 @@ def _imm_five(board, player):
     return False
 
 
-def _attacker_threats(board, player):
-    """四 or 活三を作る攻め手(=脅威手)。VCTの攻め候補。"""
+def _attacker_threats(board, player, fours_only=True):
+    """攻め手(=脅威手)。fours_only=True なら四のみ(VCF裁定用=高速)。False で活三も(VCT用)。"""
     from renju_transformer.rules import count_four_directions, count_open_three_directions
     out = []
     for m in local_empty(board):
         nb = board_with_move(board, m, player)
-        if count_four_directions(nb, m, player) >= 1 or count_open_three_directions(nb, m, player) >= 1:
+        if count_four_directions(nb, m, player) >= 1:
+            out.append(m)
+        elif not fours_only and count_open_three_directions(nb, m, player) >= 1:
             out.append(m)
     return out
 
@@ -166,9 +168,10 @@ def _atk_five_squares(board, attacker):
             if winner_after_move(board_with_move(board, s, attacker), s, attacker) == attacker]
 
 
-def bf_forced_win(board, attacker, depth, budget):
+def bf_forced_win(board, attacker, depth, budget, fours_only=True):
     """総当たり強制勝ちオラクル(独立した真の地面)。攻め手番で強制勝ちが在るか。
     戻り: True/False/None(予算切れ=不明)。
+    fours_only=True: 四のみ(=VCF裁定用, 高速)。False: 活三も(=VCT用, 重い)。
     正しい防御モデルで分岐を抑える(健全性は保つ):
       攻めの各脅威手 m を打った後、攻めの五完成点 W を数える:
         - 守りに即五 → 守り勝ち、m 失敗
@@ -185,7 +188,7 @@ def bf_forced_win(board, attacker, depth, budget):
     if depth <= 0:
         return False
     saw_unknown = False
-    for m in _attacker_threats(board, attacker):
+    for m in _attacker_threats(board, attacker, fours_only):
         b1 = board_with_move(board, m, attacker)
         if winner_after_move(b1, m, attacker) == attacker:
             return True
@@ -199,7 +202,7 @@ def bf_forced_win(board, attacker, depth, budget):
             b2 = board_with_move(b1, d, defender)
             if winner_after_move(b2, d, defender) == defender:
                 continue  # ブロックが守りの五になる(自勝ち) → m 失敗
-            r = bf_forced_win(b2, attacker, depth - 1, budget)
+            r = bf_forced_win(b2, attacker, depth - 1, budget, fours_only)
             if r is True:
                 return True
             if r is None:
@@ -212,7 +215,7 @@ def bf_forced_win(board, attacker, depth, budget):
                 if winner_after_move(b2, d, defender) == defender:
                     all_win = False
                     break
-                r = bf_forced_win(b2, attacker, depth - 1, budget)
+                r = bf_forced_win(b2, attacker, depth - 1, budget, fours_only)
                 if r is None:
                     all_win = None
                     break
@@ -270,8 +273,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--bruteforce", action="store_true",
                     help="偽陽性局面を総当たりオラクルで裁定(実バグ/アーティファクト判定)")
-    ap.add_argument("--bf-depth", type=int, default=7, help="総当たりオラクルの攻め手深さ")
-    ap.add_argument("--bf-budget", type=int, default=400000, help="総当たりオラクルのノード上限")
+    ap.add_argument("--bf-depth", type=int, default=10, help="総当たりオラクルの攻め手深さ")
+    ap.add_argument("--bf-budget", type=int, default=2000000, help="総当たりオラクルのノード上限")
+    ap.add_argument("--bf-with-threes", action="store_true",
+                    help="総当たりオラクルに活三も含める(VCT用・重い)。既定は四のみ(VCF裁定=高速)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -338,7 +343,8 @@ def main():
             for ln in audit_line(b, args.depth):
                 print("      " + ln)
             if args.bruteforce:
-                res = bf_forced_win(b, infer_player(b), args.bf_depth, [args.bf_budget])
+                res = bf_forced_win(b, infer_player(b), args.bf_depth, [args.bf_budget],
+                                    fours_only=not args.bf_with_threes)
                 verdict = {True: "強制勝ち在り → solve_vcfは正/検証器側の問題",
                            False: "強制勝ち無し → solve_vcfの実偽陽性=本物のバグ",
                            None: "不明(予算切れ。--bf-budget/--bf-depth 調整)"}[res]
