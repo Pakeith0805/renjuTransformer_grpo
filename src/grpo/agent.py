@@ -74,6 +74,15 @@ def _get_mcts_lib():
         ]
         _mcts_lib.solve_vcf_path_c_api.restype = ctypes.c_int
 
+        # VCT(四+活三)ソルバーの C-API 型定義 (fours_only=0 で活三も)
+        _mcts_lib.solve_vct_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int),    # board_array
+            ctypes.c_int,                    # player
+            ctypes.c_int,                    # max_depth
+            ctypes.c_int                     # fours_only
+        ]
+        _mcts_lib.solve_vct_c_api.restype = ctypes.c_int
+
         # 黒番の禁手判定C-APIの型定義を追加
         _mcts_lib.is_forbidden_for_black_c_api.argtypes = [
             ctypes.POINTER(ctypes.c_int),    # board_array
@@ -512,12 +521,23 @@ class GRPOAgent:
         player = infer_player(initial_board_state)
         opponent = 2 if player == 1 else 1
 
-        # TSS 模倣の核: 現局面に自分の VCF 必勝があれば、その「初手」を最良手として +1 で推す。
-        # solve_vcf は勝ち初手を1つ返す = test_tss_imitation のオラクルと同じ解なので、
-        # 報酬の最良手と模倣メトリクスのターゲットが一致する(これが無いと模倣は氷河的にしか進まない)。
+        # TSS の被覆を VCF(四のみ) と VCT(四+活三) で切替え可能に(既定OFF=VCF, 無影響)。
+        # use_vct=True で活三を接地でき、報酬の被覆が広がる(=-value依存を減らす)。VCTは重いので
+        # vct_depth は浅め推奨。getattr で安全に既定VCF。
+        use_vct = getattr(self, "use_vct", False)
+        vct_depth = int(getattr(self, "vct_depth", 4))
+
+        def solve_tss(board_arr, p):
+            if use_vct:
+                return lib.solve_vct_c_api(board_arr, p, vct_depth, 0)  # fours_only=0=活三込み
+            return lib.solve_vcf_c_api(board_arr, p, max_vcf_depth)
+
+        # TSS 模倣の核: 現局面に自分の TSS 必勝があれば、その「初手」を最良手として +1 で推す。
+        # ソルバーは勝ち初手を1つ返す = test_tss_imitation のオラクルと同じ解なので、報酬の最良手と
+        # 模倣メトリクスのターゲットが一致する(これが無いと模倣は氷河的にしか進まない)。
         # 候補ごとでなく初期局面で1回だけ呼ぶ(安い)。
         init_array = (ctypes.c_int * 225)(*initial_board_state)
-        own_vcf_move = lib.solve_vcf_c_api(init_array, player, max_vcf_depth)
+        own_win_move = solve_tss(init_array, player)
 
         # 重複排除
         unique = list(dict.fromkeys(move_indices))
@@ -525,8 +545,8 @@ class GRPOAgent:
         nn_moves, nn_boards = [], []   # value net 評価が必要な手と局面
 
         for mv in unique:
-            # TSS 上書き(0): 自分の VCF 必勝の初手 → +1 (最優先=模倣ターゲット)
-            if own_vcf_move >= 0 and mv == own_vcf_move:
+            # TSS 上書き(0): 自分の TSS 必勝の初手 → +1 (最優先=模倣ターゲット)
+            if own_win_move >= 0 and mv == own_win_move:
                 reward_of[mv] = 1.0
                 continue
             next_board = board_with_move(initial_board_state, mv, player)
@@ -534,9 +554,9 @@ class GRPOAgent:
             if winner_after_move(next_board, mv, player) == player:
                 reward_of[mv] = 1.0
                 continue
-            # TSS 上書き(2): 相手に VCF 必勝が生じる手は悪手
+            # TSS 上書き(2): 相手に TSS 必勝が生じる手は悪手
             board_array = (ctypes.c_int * 225)(*next_board)
-            if lib.solve_vcf_c_api(board_array, opponent, max_vcf_depth) >= 0:
+            if solve_tss(board_array, opponent) >= 0:
                 reward_of[mv] = -1.0
                 continue
             nn_moves.append(mv)

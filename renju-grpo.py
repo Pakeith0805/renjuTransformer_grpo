@@ -93,7 +93,12 @@ def main(cfg: DictConfig) -> None:
         use_puct_training=cfg.grpo.get("use_puct_training", False),
         value_model=value_model,
     )
-    
+    # TSS被覆: VCF(四のみ, 既定) か VCT(四+活三) か。VCTは重いので vct_depth は浅め。
+    agent.use_vct = cfg.grpo.get("use_vct", False)
+    agent.vct_depth = int(cfg.grpo.get("vct_depth", 4))
+    if agent.use_vct:
+        print(f"報酬TSS: VCT(四+活三) depth={agent.vct_depth} を使用")
+
     trainer = GRPOTrainer(
         agent=agent,
         optimizer=optimizer,

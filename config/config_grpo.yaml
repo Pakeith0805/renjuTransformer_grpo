@@ -37,6 +37,8 @@ grpo:
   dirichlet_weight: 0.25         # ノイズの混合比率 (0.0 で無効化)
   skip_collapsed_steps: true     # advantage消滅ステップで optimizer.step をスキップ
   use_topk_weighted: false       # true: ノイズ→top-K(π̃)列挙→π重み和（期待値版GRPO） / false: 従来のMCサンプリング
+  use_vct: false                 # true: 報酬のTSSをVCF(四のみ)でなくVCT(四+活三)で判定し被覆拡大。重いので vct_depth は浅め
+  vct_depth: 4                   # use_vct時のVCT探索深さ(浅いほど速い。活三系の被覆と速度のトレードオフ)
   use_value_judge: false         # true: 報酬を MCTSロールアウトでなく value net(一括GPU評価)+TSS上書きで出す(v1)
   value_judge_path: models/pretrained_value.pt  # use_value_judge=true 時に使う value ヘッド付き checkpoint
   value_cotrain: false           # true: GRPO中に value net を自己対戦勝敗で継続学習(凍結の陳腐化を防ぐ, v1.5)。use_value_judge & use_full_game_training 前提
