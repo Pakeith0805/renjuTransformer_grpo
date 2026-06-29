@@ -1416,7 +1416,8 @@ int solve_vcf_recursive(Board& board, int player, int depth, int& node_count) {
 //   - fours_only=false で活三も脅威に(VCT)。受けが複数なので全ローカル防御に勝てれば勝ち(P2で精緻化)。
 // 戻り: 必勝の初手 index / 無ければ -1。健全(偽陽性0)を最優先(予算切れ・depth切れは -1)。
 // ============================================================
-int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bool fours_only) {
+int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bool fours_only,
+                        int last_move = -1) {
     if (++node_count > 200000) {
         return -1; // 予算切れは -1(取りこぼし側=健全)
     }
@@ -1433,16 +1434,34 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
         return -1;
     }
 
+    // 依存関係検索(Allis): 新しい攻め脅威は直前の攻め手 last_move に依存(近傍で連なる)。
+    // root(last_move<0)は盤面全体、再帰では last_move の近傍 FOCUS マスのみを攻め候補にして OR分岐を激減。
+    // 候補を絞る=攻めの手を減らすだけなので偽陽性は増えない(健全)。影響は完全性(稀に非連結勝ちを取りこぼす)のみ。
+    const int FOCUS = 4;
+    int lr = -1, lc = -1;
+    if (last_move >= 0) {
+        auto [r0, c0] = idx_to_rc(last_move);
+        lr = r0; lc = c0;
+    }
+
     for (int m : cands) {
         if (board[static_cast<std::size_t>(m)] != EMPTY) {
             continue;
         }
+        if (last_move >= 0) {
+            auto [mr0, mc0] = idx_to_rc(m);
+            int ddr = mr0 - lr; if (ddr < 0) ddr = -ddr;
+            int ddc = mc0 - lc; if (ddc < 0) ddc = -ddc;
+            if (ddr > FOCUS || ddc > FOCUS) {
+                continue; // 依存関係: 直前手から遠い脅威は探索しない
+            }
+        }
         board[static_cast<std::size_t>(m)] = player;
 
-        // 攻めの五完成点 W (= m を打った後、次に1手で五になる空きマス)
+        // 攻めの五完成点 W (= m を打った後、次に1手で五になる空きマス)。五完成点は局所なので cands で十分。
         std::vector<int> W;
-        for (int s = 0; s < BOARD_CELLS; ++s) {
-            if (is_winning_move(board, s, player)) {
+        for (int s : cands) {
+            if (board[static_cast<std::size_t>(s)] == EMPTY && is_winning_move(board, s, player)) {
                 W.push_back(s);
             }
         }
@@ -1477,7 +1496,7 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 board[static_cast<std::size_t>(m)] = EMPTY;
                 continue; // ブロックが守りの五になる(自勝ち) → m 失敗
             }
-            const int r = solve_vct_recursive(board, player, depth - 1, node_count, fours_only);
+            const int r = solve_vct_recursive(board, player, depth - 1, node_count, fours_only, m);
             board[static_cast<std::size_t>(blk)] = EMPTY;
             board[static_cast<std::size_t>(m)] = EMPTY;
             if (r != -1) {
@@ -1496,8 +1515,10 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 if (board[static_cast<std::size_t>(g)] != EMPTY) continue;
                 board[static_cast<std::size_t>(g)] = player;
                 int fivepts = 0;
-                for (int t = 0; t < BOARD_CELLS; ++t) {
-                    if (is_winning_move(board, t, player)) { if (++fivepts >= 2) break; }
+                for (int t : cands) {
+                    if (board[static_cast<std::size_t>(t)] == EMPTY && is_winning_move(board, t, player)) {
+                        if (++fivepts >= 2) break;
+                    }
                 }
                 board[static_cast<std::size_t>(g)] = EMPTY;
                 if (fivepts >= 2) C.push_back(g);
@@ -1524,7 +1545,7 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 if (!placed.empty()) {
                     if (def_five) {
                         three_forces = false; // 守りが C 占有で五を作る → 守り勝ち
-                    } else if (solve_vct_recursive(board, player, depth - 1, node_count, fours_only) == -1) {
+                    } else if (solve_vct_recursive(board, player, depth - 1, node_count, fours_only, m) == -1) {
                         three_forces = false; // 最防御盤で攻めが勝てない → この活三は強制でない
                     }
                 }
@@ -1542,7 +1563,7 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                     if (winner_after_move(board, f, opponent) == opponent) {
                         rB = -1; // 守りが五で勝つ
                     } else {
-                        rB = solve_vct_recursive(board, player, depth - 1, node_count, fours_only);
+                        rB = solve_vct_recursive(board, player, depth - 1, node_count, fours_only, m);
                     }
                     board[static_cast<std::size_t>(f)] = EMPTY;
                     if (rB == -1) {
