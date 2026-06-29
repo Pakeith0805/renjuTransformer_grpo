@@ -49,10 +49,11 @@ def other(p):
 
 _path_lib = None
 _vct_lib = None
+_VCT_FOURS_ONLY = 1  # --vct-threes で 0(=活三も=VCT) に切替
 
 
 def solve_vct(board, player, depth):
-    """P1新ソルバー solve_vct_c_api(fours_only=1=正しいVCF) のラッパ。再ビルド後のdllが必要。"""
+    """solve_vct_c_api のラッパ。_VCT_FOURS_ONLY=1=正しいVCF / 0=VCT(活三も)。再ビルド後のdllが必要。"""
     global _vct_lib
     if _vct_lib is None:
         name = "mcts.so" if sys.platform != "win32" else "mcts.dll"
@@ -61,7 +62,7 @@ def solve_vct(board, player, depth):
             ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int, ctypes.c_int]
         _vct_lib.solve_vct_c_api.restype = ctypes.c_int
     arr = (ctypes.c_int * N)(*board)
-    return _vct_lib.solve_vct_c_api(arr, player, depth, 1)
+    return _vct_lib.solve_vct_c_api(arr, player, depth, _VCT_FOURS_ONLY)
 
 
 def vcf_line(board, player, depth):
@@ -308,11 +309,17 @@ def main():
                     help="総当たりオラクルに活三も含める(VCT用・重い)。既定は四のみ(VCF裁定=高速)")
     ap.add_argument("--solver", choices=["vcf", "vct"], default="vcf",
                     help="検証するソルバー。vct=P1新実装(solve_vct_c_api, 要再ビルド)")
+    ap.add_argument("--vct-threes", action="store_true",
+                    help="solve_vct を活三込み(VCT, fours_only=0)で呼ぶ。P2の健全性ゲート用")
     ap.add_argument("--compare", action="store_true",
                     help="solve_vcf と solve_vct の完全性比較(同じ局面で勝ち判定が一致するか)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
+    global _VCT_FOURS_ONLY
+    if args.vct_threes:
+        _VCT_FOURS_ONLY = 0
+        print("solve_vct: 活三込み(VCT, fours_only=0)で検証", file=sys.stderr)
 
     # --- 完全性比較モード: 旧solve_vcf と 新solve_vct が同じ局面で同じ勝ち判定をするか ---
     if args.compare:

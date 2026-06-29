@@ -1484,13 +1484,52 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 return m;
             }
         } else {
-            // 活三(VCT): 守りは複数。全ローカル合法手に勝てれば勝ち(健全のため超集合, P2で精緻化)
-            bool all_win = true;
-            std::vector<int> replies = neighbor_candidates(board, 2);
-            for (int d : replies) {
-                if (board[static_cast<std::size_t>(d)] != EMPTY) {
-                    continue;
+            // 活三(VCT, P2 conservative defender): 守りの応手 D を
+            //   G(攻めが次に達四=「>=2 五完成点」を作れる gain square) ∪ 守りのカウンター四 ∪ m近傍(距離1)
+            // に絞った AND-node。これらは守りの「負けない応手」の超集合 → 健全(偽陽性を出さない方向)、
+            // かつ小さく非爆発。黒の禁手は受けに使えない(=受け切れなければ攻め勝ち)。
+            std::vector<int> D;
+            std::vector<char> inD(BOARD_CELLS, 0);
+            auto addD = [&](int s) {
+                if (s >= 0 && s < BOARD_CELLS &&
+                    board[static_cast<std::size_t>(s)] == EMPTY && !inD[static_cast<std::size_t>(s)]) {
+                    inD[static_cast<std::size_t>(s)] = 1;
+                    D.push_back(s);
                 }
+            };
+            // G: 達四化の gain squares (攻めが次にそこへ打つと五完成点が2つ以上=受け不能)
+            for (int g : cands) {
+                if (board[static_cast<std::size_t>(g)] != EMPTY) continue;
+                board[static_cast<std::size_t>(g)] = player;
+                int fivepts = 0;
+                for (int t = 0; t < BOARD_CELLS; ++t) {
+                    if (is_winning_move(board, t, player)) { if (++fivepts >= 2) break; }
+                }
+                board[static_cast<std::size_t>(g)] = EMPTY;
+                if (fivepts >= 2) addD(g);
+            }
+            // 守りのカウンター四(攻めに応手を強いる)
+            for (int d : cands) {
+                if (board[static_cast<std::size_t>(d)] == EMPTY && creates_four_threat(board, d, opponent)) {
+                    addD(d);
+                }
+            }
+            // m 近傍(距離1)も安全マージンで含める(健全の超集合担保)
+            {
+                auto [mr, mc] = idx_to_rc(m);
+                for (int dr = -1; dr <= 1; ++dr) {
+                    for (int dc = -1; dc <= 1; ++dc) {
+                        if (inside(mr + dr, mc + dc)) addD(rc_to_idx(mr + dr, mc + dc));
+                    }
+                }
+            }
+            bool all_win = true;
+            bool any_legal = false;
+            for (int d : D) {
+                if (opponent == BLACK && is_forbidden_for_black(board, d)) {
+                    continue; // 黒は禁手点に受けられない
+                }
+                any_legal = true;
                 board[static_cast<std::size_t>(d)] = opponent;
                 int r;
                 if (winner_after_move(board, d, opponent) == opponent) {
@@ -1505,6 +1544,9 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 }
             }
             board[static_cast<std::size_t>(m)] = EMPTY;
+            if (!any_legal) {
+                return m; // 合法な受けが無い(全部黒禁手) → 受け切れない=攻め勝ち
+            }
             if (all_win) {
                 return m;
             }
