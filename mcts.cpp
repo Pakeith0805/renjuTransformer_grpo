@@ -1458,10 +1458,11 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
         }
         board[static_cast<std::size_t>(m)] = player;
 
-        // 攻めの五完成点 W (= m を打った後、次に1手で五になる空きマス)。五完成点は局所なので cands で十分。
+        // 攻めの五完成点 W (= m を打った後、次に1手で五になる空きマス)。
+        // 達四の端点は元の石から距離3+になりうるので、健全性のため全盤面を走査する(局所化はFPの原因だった)。
         std::vector<int> W;
-        for (int s : cands) {
-            if (board[static_cast<std::size_t>(s)] == EMPTY && is_winning_move(board, s, player)) {
+        for (int s = 0; s < BOARD_CELLS; ++s) {
+            if (is_winning_move(board, s, player)) {
                 W.push_back(s);
             }
         }
@@ -1515,8 +1516,8 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 if (board[static_cast<std::size_t>(g)] != EMPTY) continue;
                 board[static_cast<std::size_t>(g)] = player;
                 int fivepts = 0;
-                for (int t : cands) {
-                    if (board[static_cast<std::size_t>(t)] == EMPTY && is_winning_move(board, t, player)) {
+                for (int t = 0; t < BOARD_CELLS; ++t) {  // 達四端点取りこぼし防止のため全盤面(健全性優先)
+                    if (is_winning_move(board, t, player)) {
                         if (++fivepts >= 2) break;
                     }
                 }
