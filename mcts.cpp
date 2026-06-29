@@ -1484,20 +1484,14 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                 return m;
             }
         } else {
-            // 活三(VCT, P2 conservative defender): 守りの応手 D を
-            //   G(攻めが次に達四=「>=2 五完成点」を作れる gain square) ∪ 守りのカウンター四 ∪ m近傍(距離1)
-            // に絞った AND-node。これらは守りの「負けない応手」の超集合 → 健全(偽陽性を出さない方向)、
-            // かつ小さく非爆発。黒の禁手は受けに使えない(=受け切れなければ攻め勝ち)。
-            std::vector<int> D;
-            std::vector<char> inD(BOARD_CELLS, 0);
-            auto addD = [&](int s) {
-                if (s >= 0 && s < BOARD_CELLS &&
-                    board[static_cast<std::size_t>(s)] == EMPTY && !inD[static_cast<std::size_t>(s)]) {
-                    inD[static_cast<std::size_t>(s)] = 1;
-                    D.push_back(s);
-                }
-            };
-            // G: 達四化の gain squares (攻めが次にそこへ打つと五完成点が2つ以上=受け不能)
+            // 活三(VCT, Allis 1994 conservative defender): 守りのブロック分岐を畳み込む。
+            //   防御マス C = 達四化 gain squares(攻めがそこへ打つと五完成点>=2=達四になる点)。
+            //   [Branch A] 守りが C を「一度に全部」占有した最防御盤で1回だけ再帰。最防御で攻めが勝てれば、
+            //     実戦で守りが毎手1石ずつしか置けない盤でも必ず勝てる(石が増えるほど攻めは不利)=健全。
+            //     →守りのブロック手の全分岐を1分岐に集約(高速化)。
+            //   [Branch B] ただし守りの「カウンター四(C外で四を作り手番を奪う)」は最防御盤に含まれないので別途分岐。
+            //   攻め勝ち ⇔ Branch A で勝ち かつ 全カウンター四分岐で勝ち。黒の禁手点は守りに使えない。
+            std::vector<int> C;
             for (int g : cands) {
                 if (board[static_cast<std::size_t>(g)] != EMPTY) continue;
                 board[static_cast<std::size_t>(g)] = player;
@@ -1506,48 +1500,60 @@ int solve_vct_recursive(Board& board, int player, int depth, int& node_count, bo
                     if (is_winning_move(board, t, player)) { if (++fivepts >= 2) break; }
                 }
                 board[static_cast<std::size_t>(g)] = EMPTY;
-                if (fivepts >= 2) addD(g);
+                if (fivepts >= 2) C.push_back(g);
             }
-            // 守りのカウンター四(攻めに応手を強いる)
-            for (int d : cands) {
-                if (board[static_cast<std::size_t>(d)] == EMPTY && creates_four_threat(board, d, opponent)) {
-                    addD(d);
-                }
+            if (C.empty()) {
+                board[static_cast<std::size_t>(m)] = EMPTY;
+                continue; // 達四化できない=本物の活三脅威でない
             }
-            // m 近傍(距離1)も安全マージンで含める(健全の超集合担保)
+
+            bool three_forces = true;
+
+            // [Branch A] conservative defender: C を一括占有した最防御盤で1回だけ再帰
             {
-                auto [mr, mc] = idx_to_rc(m);
-                for (int dr = -1; dr <= 1; ++dr) {
-                    for (int dc = -1; dc <= 1; ++dc) {
-                        if (inside(mr + dr, mc + dc)) addD(rc_to_idx(mr + dr, mc + dc));
+                std::vector<int> placed;
+                bool def_five = false;
+                for (int g : C) {
+                    if (board[static_cast<std::size_t>(g)] != EMPTY) continue;
+                    if (opponent == BLACK && is_forbidden_for_black(board, g)) continue; // 黒は禁手点を守りに使えない
+                    board[static_cast<std::size_t>(g)] = opponent;
+                    placed.push_back(g);
+                    if (winner_after_move(board, g, opponent) == opponent) def_five = true;
+                }
+                // placed が空 = 守りは C を1つも合法占有できない → ブロック不能(この分岐では refute しない)
+                if (!placed.empty()) {
+                    if (def_five) {
+                        three_forces = false; // 守りが C 占有で五を作る → 守り勝ち
+                    } else if (solve_vct_recursive(board, player, depth - 1, node_count, fours_only) == -1) {
+                        three_forces = false; // 最防御盤で攻めが勝てない → この活三は強制でない
+                    }
+                }
+                for (int g : placed) board[static_cast<std::size_t>(g)] = EMPTY;
+            }
+
+            // [Branch B] 守りのカウンター四(C外で四を作り手番を奪う)
+            if (three_forces) {
+                for (int f : cands) {
+                    if (board[static_cast<std::size_t>(f)] != EMPTY) continue;
+                    if (opponent == BLACK && is_forbidden_for_black(board, f)) continue;
+                    if (!creates_four_threat(board, f, opponent)) continue;
+                    board[static_cast<std::size_t>(f)] = opponent;
+                    int rB;
+                    if (winner_after_move(board, f, opponent) == opponent) {
+                        rB = -1; // 守りが五で勝つ
+                    } else {
+                        rB = solve_vct_recursive(board, player, depth - 1, node_count, fours_only);
+                    }
+                    board[static_cast<std::size_t>(f)] = EMPTY;
+                    if (rB == -1) {
+                        three_forces = false;
+                        break;
                     }
                 }
             }
-            bool all_win = true;
-            bool any_legal = false;
-            for (int d : D) {
-                if (opponent == BLACK && is_forbidden_for_black(board, d)) {
-                    continue; // 黒は禁手点に受けられない
-                }
-                any_legal = true;
-                board[static_cast<std::size_t>(d)] = opponent;
-                int r;
-                if (winner_after_move(board, d, opponent) == opponent) {
-                    r = -1; // 守りが五で勝つ
-                } else {
-                    r = solve_vct_recursive(board, player, depth - 1, node_count, fours_only);
-                }
-                board[static_cast<std::size_t>(d)] = EMPTY;
-                if (r == -1) {
-                    all_win = false;
-                    break;
-                }
-            }
+
             board[static_cast<std::size_t>(m)] = EMPTY;
-            if (!any_legal) {
-                return m; // 合法な受けが無い(全部黒禁手) → 受け切れない=攻め勝ち
-            }
-            if (all_win) {
+            if (three_forces) {
                 return m;
             }
         }
