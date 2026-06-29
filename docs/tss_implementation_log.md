@@ -208,4 +208,18 @@ solve_vct の“勝ち手順”終端が **「攻-相手禁手で受け不能(9,
   3. 防御列挙は **legal_defender_moves 相当(黒禁手除外)** をC++にも。
   4. ハーネス(--solver vct, fours_only=0版)で false_positive=0、`test_tss_imitation` 活三カテゴリで完全性を見る。
 
+### 2026-06-28 — P2健全性ゲート(暫定) + VCT報酬配線
+- VCT健全性ゲート: 型生成(--use-templates)で高速化したが活三VCTは重く、**depth=2で false_positive=0
+  (unconfirmed=5=予算切れ)**。**暫定パス**(浅いので深いVCTの健全性は未確認、時間優先でクリア扱い)。
+  VCF(production)は無影響を再確認。
+- **VCT報酬配線**: `value_judge_rewards` に `use_vct`(既定OFF)。ONで own勝ち/相手脅威を VCF→VCT
+  (solve_vct_c_api fours_only=0, `vct_depth`既定4)で判定し**活三系を接地→被覆拡大(=-value依存を減らす)**。
+  config: `use_vct`/`vct_depth`。renju-grpoでagentに設定。既定OFFで現行VCFのまま無影響。
+- **未了/注意**:
+  - **速度**: VCTは重い。報酬は候補手×毎stepで呼ぶので use_vct=true は訓練が遅くなる。vct_depth浅め必須、
+    まず短い run で it/s を測ってから長回しすること。遅すぎるなら vct_depth↓ か VCT最適化(Dを G∪カウンター四のみに絞る等)。
+  - **train/eval整合**: 報酬をVCTにしても `test_tss_imitation` のオラクルは未だVCF。活三学習を正しく測るには
+    オラクルもVCT化が要る(follow-up)。四三カテゴリはVCFでも解けるので部分的には観測可能。
+  - 深いVCTの健全性: depth>2 で false_positive=0 を確認したい(時間が許せば)。
+
 ### （以後追記）
