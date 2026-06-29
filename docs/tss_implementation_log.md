@@ -222,4 +222,18 @@ solve_vct の“勝ち手順”終端が **「攻-相手禁手で受け不能(9,
     オラクルもVCT化が要る(follow-up)。四三カテゴリはVCFでも解けるので部分的には観測可能。
   - 深いVCTの健全性: depth>2 で false_positive=0 を確認したい(時間が許せば)。
 
+### 2026-06-28 — VCT健全性ゲート通過(faithful TSS 一通り完成)
+- VCTの速度問題を3段で解決し、**depth=3・seed=1で false_positive=0(42/42)** を達成:
+  1. **conservative defender**: 守りのブロック分岐を「cost squares C を一括占有した最防御盤で1回再帰」に集約
+     (+カウンター四のみ別分岐)。
+  2. **dependency-based search(Allis)**: 再帰では攻め候補を直前手±FOCUS(4)近傍に限定しOR分岐削減。健全(攻めを減らすだけ)。
+  3. **五完成点スキャンの幾何最適化**: 三分岐では攻めに即五が無い→石p後の新五完成点は必ずp同一ライン・距離4以内
+     にしか無い → 4方向×距離4(最大32マス)で取りこぼし0%・高速(`five_completions_local`)。
+     ※途中で「cands(40)に局所化」したらFP発生(達四端点取りこぼし)→この幾何スキャンで健全かつ高速に決着。
+- **faithful TSS の到達点**: VCF(四)はproduction統合・健全。VCT(四+活三)は健全かつ実用速度。
+  cost squares C=G(達四化gain squares)。健全性ゲート=verify_tss_soundness(--solver vct --vct-threes)。
+- **次**: `use_vct=true`(既定OFF)で報酬の被覆を活三へ拡大する実験(=-value依存を減らす本丸)。
+  vct_depth浅め(2-4)で開始、it/s 測ってから長回し。train/eval整合のため test_tss_imitation のオラクルも
+  いずれVCT化(follow-up)。
+
 ### （以後追記）
