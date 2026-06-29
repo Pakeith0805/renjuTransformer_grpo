@@ -102,13 +102,19 @@ class GRPOTrainer:
             sys.path.insert(0, scripts_dir)
         from test_tss_imitation import build_imitation_cases, score_imitation
         if self.tss_imit_cases is None:
+            use_vct = bool(self.cfg.grpo.get("tss_imitation_use_vct", False))
+            default_depth = 3 if use_vct else 12
+            depth_raw = self.cfg.grpo.get("tss_imitation_depth", None)
+            depth = int(depth_raw) if depth_raw is not None else default_depth
             self.tss_imit_cases = build_imitation_cases(
                 source=self.cfg.grpo.get("tss_imitation_source", "template"),
                 per_category=int(self.cfg.grpo.get("tss_imitation_per_category", 100)),
-                depth=int(self.cfg.grpo.get("tss_imitation_depth", 12)),
+                depth=depth,
                 seed=int(self.cfg.grpo.get("tss_imitation_seed", 0)),
+                use_vct=use_vct,
             )
-            print(f"TSS imitation eval: {len(self.tss_imit_cases)} 固定ケースを構築")
+            oracle_label = "VCT(四+活三)" if use_vct else "VCF(四のみ)"
+            print(f"TSS imitation eval: {len(self.tss_imit_cases)} 固定ケースを構築 (oracle={oracle_label})")
         overall, per_cat = score_imitation(
             self.agent.policy, self.agent.tokenizer, self.tss_imit_cases, self.agent.device)
         mlflow.log_metric("tss_imitation_top1", overall * 100, step=iteration)

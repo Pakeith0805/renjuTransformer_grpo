@@ -1,25 +1,28 @@
 #!/usr/bin/env python
 """
-TSS(VCF) 模倣テスト
-===================
-policy が「探索なしの一発推論」でどこまで TSS らしい手を選べるかを、VCF ソルバーを
+TSS(VCF/VCT) 模倣テスト
+========================
+policy が「探索なしの一発推論」でどこまで TSS らしい手を選べるかを、VCF/VCT ソルバーを
 正解オラクルにして自動採点する。
 
 考え方:
   - 型(テンプレ)で戦術モチーフを作る (四・四三・受け・優先順位)。
   - 位置/向き/色をランダムに振り、パリティを安全なフィラー石で合わせる。
-  - 盤面を `solve_vcf_c_api` に通し、**オラクルが意図通りの答えを返す盤面だけ採用**
+  - 盤面をオラクルに通し、**オラクルが意図通りの答えを返す盤面だけ採用**
     (= 自己検算。ソルバーの細かい挙動を予測しなくても、正解が確定した盤面だけ残る)。
   - 各モデルの masked-argmax がオラクル手と一致するか、正解手への確率質量はどれだけか、を集計。
 
-このコードベースの TSS は VCF(四の連続強制) のみ。活三だけの攻防(②③)は射程外なので
-ここでは扱わない(v2 で VCT/手ラベルを追加予定)。
+オラクル選択:
+  --use-vct なし(既定): VCF(四のみ) — use_vct=false の学習設定と整合。
+  --use-vct あり       : VCT(四+活三) — use_vct=true の学習設定と整合。
+                         深さは --depth (既定3) を推奨(深いと遅い)。
 
 使い方:
   uv run python scripts/test_tss_imitation.py \
       --models pretrained=artifacts/checkpoints/pretrained.pt \
                g32_80=artifacts/exp_minimax_topk_g32/grpo_checkpoint_80.pt \
       --per-category 200 --seed 0
+  VCT版: --use-vct --depth 3
   オプション: --depth 12  --device cpu  --out results.csv  --show 3
 """
 from __future__ import annotations
@@ -48,7 +51,7 @@ DIRS = list(PERP.keys())
 
 
 # --------------------------------------------------------------------------- #
-# C ライブラリ (VCF ソルバー = オラクル)
+# C ライブラリ (VCF/VCT ソルバー = オラクル)
 # --------------------------------------------------------------------------- #
 _lib = None
 
@@ -63,32 +66,47 @@ def get_lib():
         _lib = ctypes.CDLL(str(path))
         _lib.solve_vcf_c_api.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
         _lib.solve_vcf_c_api.restype = ctypes.c_int
+        _lib.solve_vct_c_api.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        _lib.solve_vct_c_api.restype = ctypes.c_int
     return _lib
 
 
 def vcf(board, player, depth):
-    """player の VCF 勝ち初手 index (>=0) / 無ければ -1。"""
+    """player の VCF 勝ち初手 index (>=0) / 無ければ -1。四のみ。"""
     arr = (ctypes.c_int * 225)(*board)
     return get_lib().solve_vcf_c_api(arr, player, depth)
 
 
-def oracle(board, depth):
-    """コードベースの TSS と同じ判断: 自分VCF→attack / 相手VCF→block / どちらも無→(None)。
+def vct(board, player, depth):
+    """player の VCT 勝ち初手 index (>=0) / 無ければ -1。四+活三。"""
+    arr = (ctypes.c_int * 225)(*board)
+    return get_lib().solve_vct_c_api(arr, player, depth, 0)  # fours_only=0
+
+
+def solve_tss(board, player, depth, use_vct=False):
+    """use_vct=True なら VCT(四+活三)、False なら VCF(四のみ)。学習設定と一致させる。"""
+    return vct(board, player, depth) if use_vct else vcf(board, player, depth)
+
+
+def oracle(board, depth, use_vct=False):
+    """コードベースの TSS と同じ判断: 自分TSS→attack / 相手TSS→block / どちらも無→(None)。
+    use_vct=True のとき VCT(四+活三) で判定 — use_vct=true の学習設定と整合。
     返り値: ("attack"|"block"|None, move_index)。"""
     me = infer_player(board)
     opp = WHITE if me == BLACK else BLACK
-    my = vcf(board, me, depth)
+    my = solve_tss(board, me, depth, use_vct)
     if my >= 0:
         return "attack", my
-    op = vcf(board, opp, depth)
+    op = solve_tss(board, opp, depth, use_vct)
     if op >= 0:
         return "block", op
     return None, -1
 
 
-def block_defense_set(board, depth):
-    """相手VCFを消す自分の合法手の集合(=有効な受け全部)。学習側の受け基準
-    `solve_vcf(自分が打った後の盤, 相手) < 0` と同一述語。空集合なら受け不能(=その局面は不採用)。
+def block_defense_set(board, depth, use_vct=False):
+    """相手TSS脅威を消す自分の合法手の集合(=有効な受け全部)。学習側の受け基準と同一述語。
+    空集合なら受け不能(=その局面は不採用)。
     集合メンバーシップ採点用: pred がこの集合に入れば正解(オラクルの1手縛りをやめる)。"""
     me = infer_player(board)
     opp = WHITE if me == BLACK else BLACK
@@ -99,7 +117,7 @@ def block_defense_set(board, depth):
             continue
         nb = list(board)
         nb[mv] = me
-        if vcf(nb, opp, depth) < 0:   # 自分が mv を打つと相手VCFが消える = 有効な受け
+        if solve_tss(nb, opp, depth, use_vct) < 0:  # 自分が mv を打つと相手脅威が消える
             s.add(mv)
     return s
 
@@ -278,7 +296,7 @@ GENERATORS = {
 }
 
 
-def make_case(name, rng, depth, tries=200):
+def make_case(name, rng, depth, tries=200, use_vct=False):
     """型生成→パリティ調整→オラクル検算。意図通りに正解が確定した盤面のみ返す。"""
     gen = GENERATORS[name]
     for _ in range(tries):
@@ -289,7 +307,7 @@ def make_case(name, rng, depth, tries=200):
         if not balance_parity(board, case["to_move"], rng):
             continue
         try:
-            kind, mv = oracle(board, depth)
+            kind, mv = oracle(board, depth, use_vct)
         except ValueError:
             continue  # パリティ不正など
         if kind != case["want"] or mv < 0:
@@ -306,19 +324,19 @@ def make_case(name, rng, depth, tries=200):
 # --------------------------------------------------------------------------- #
 # ケース収集: template(型) と random(自然局面+オラクル選別)
 # --------------------------------------------------------------------------- #
-def collect_template_cases(rng, depth, per_category):
+def collect_template_cases(rng, depth, per_category, use_vct=False):
     cases = []
     for cat in GENERATORS:
         made, fails = 0, 0
         while made < per_category and fails < per_category * 3 + 50:
-            c = make_case(cat, rng, depth)
+            c = make_case(cat, rng, depth, use_vct=use_vct)
             if c is None:
                 fails += 1
                 continue
             case = dict(cat=cat, board=c["board"], answer=c["answer"],
                         distractor=c["distractor"], kind=c["oracle_kind"])
             if c["oracle_kind"] == "block":
-                cs = block_defense_set(c["board"], depth)  # 有効な受け全部(集合採点)
+                cs = block_defense_set(c["board"], depth, use_vct)  # 有効な受け全部(集合採点)
                 if not cs:
                     fails += 1
                     continue  # 受け不能=不採用
@@ -346,7 +364,7 @@ def gen_random_position(rng, kmin, kmax):
     return board
 
 
-def collect_random_cases(rng, depth, per_category, kmin, kmax):
+def collect_random_cases(rng, depth, per_category, kmin, kmax, use_vct=False):
     """自然局面を量産し、オラクルが attack/block と判定したものだけ各 per_category まで採用。"""
     buckets = {"attack": [], "block": []}
     cap = per_category * 600 + 3000
@@ -357,7 +375,7 @@ def collect_random_cases(rng, depth, per_category, kmin, kmax):
         if board is None:
             continue
         try:
-            kind, mv = oracle(board, depth)
+            kind, mv = oracle(board, depth, use_vct)
         except ValueError:
             continue
         if kind is None or mv < 0 or not legal_move_mask(board)[mv]:
@@ -366,7 +384,7 @@ def collect_random_cases(rng, depth, per_category, kmin, kmax):
             continue
         case = dict(cat=kind, board=board, answer=mv, distractor=set(), kind=kind)
         if kind == "block":
-            cs = block_defense_set(board, depth)  # 有効な受け全部(集合採点)
+            cs = block_defense_set(board, depth, use_vct)  # 有効な受け全部(集合採点)
             if not cs:
                 continue  # 受け不能=不採用
             case["correct_set"] = cs
@@ -417,12 +435,14 @@ def print_board(board):
 # --------------------------------------------------------------------------- #
 # 学習中の定点観測用 API (trainer から import して使う)
 # --------------------------------------------------------------------------- #
-def build_imitation_cases(source="template", per_category=100, depth=12, seed=0, kmin=8, kmax=30):
-    """固定の評価ケース集合を1回だけ作る。反復間で同じ集合を使えば模倣率が比較可能になる。"""
+def build_imitation_cases(source="template", per_category=100, depth=12, seed=0,
+                          kmin=8, kmax=30, use_vct=False):
+    """固定の評価ケース集合を1回だけ作る。反復間で同じ集合を使えば模倣率が比較可能になる。
+    use_vct=True のとき VCT オラクル(四+活三) — 学習の use_vct=true と整合させる。"""
     rng = random.Random(seed)
     if source == "random":
-        return collect_random_cases(rng, depth, per_category, kmin, kmax)
-    return collect_template_cases(rng, depth, per_category)
+        return collect_random_cases(rng, depth, per_category, kmin, kmax, use_vct)
+    return collect_template_cases(rng, depth, per_category, use_vct)
 
 
 def score_imitation(model, tokenizer, cases, device):
@@ -464,7 +484,10 @@ def main():
                     help="template=型生成 / random=ランダム対局K手→オラクル選別の自然局面")
     ap.add_argument("--kmin", type=int, default=8, help="random: 進める手数の下限")
     ap.add_argument("--kmax", type=int, default=30, help="random: 進める手数の上限")
-    ap.add_argument("--depth", type=int, default=12, help="VCF 探索深さ(オラクル)")
+    ap.add_argument("--depth", type=int, default=None,
+                    help="TSS 探索深さ(オラクル)。未指定時: VCF=12, VCT=3")
+    ap.add_argument("--use-vct", action="store_true",
+                    help="オラクルを VCT(四+活三) に切り替え。学習 use_vct=true と整合させる場合に使う")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default=None, help="サンプル毎の結果を書く CSV")
@@ -476,6 +499,10 @@ def main():
     device = select_device(args.device)
     tokenizer = RenjuTokenizer(sep_token_id=228, move_id_offset=3)
 
+    use_vct = args.use_vct
+    depth = args.depth if args.depth is not None else (3 if use_vct else 12)
+    print(f"oracle: {'VCT(四+活三)' if use_vct else 'VCF(四のみ)'}  depth={depth}")
+
     models = {}
     for spec in args.models:
         label, path = spec.split("=", 1)
@@ -484,9 +511,9 @@ def main():
 
     # ---- ケース収集 (ソース別) ----
     if args.source == "random":
-        cases = collect_random_cases(rng, args.depth, args.per_category, args.kmin, args.kmax)
+        cases = collect_random_cases(rng, depth, args.per_category, args.kmin, args.kmax, use_vct)
     else:
-        cases = collect_template_cases(rng, args.depth, args.per_category)
+        cases = collect_template_cases(rng, depth, args.per_category, use_vct)
     print(f"collected {len(cases)} cases (source={args.source})")
 
     categories = []
@@ -516,8 +543,9 @@ def main():
             rows.append((lab, cat, ans, pred, ok, round(pmass, 4), int(pred in distr)))
 
     # ---- レポート ----
+    oracle_label = "VCT(四+活三)" if use_vct else "VCF(四のみ)"
     print("\n" + "=" * 72)
-    print(" TSS(VCF) 模倣テスト結果  (top1=オラクル一致率, p=正解手への平均確率)")
+    print(f" TSS({oracle_label}) 模倣テスト結果  (top1=オラクル一致率, p=正解手への平均確率)")
     print("=" * 72)
     for lab in models:
         print(f"\n# {lab}")
