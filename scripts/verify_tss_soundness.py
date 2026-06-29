@@ -308,9 +308,47 @@ def main():
                     help="総当たりオラクルに活三も含める(VCT用・重い)。既定は四のみ(VCF裁定=高速)")
     ap.add_argument("--solver", choices=["vcf", "vct"], default="vcf",
                     help="検証するソルバー。vct=P1新実装(solve_vct_c_api, 要再ビルド)")
+    ap.add_argument("--compare", action="store_true",
+                    help="solve_vcf と solve_vct の完全性比較(同じ局面で勝ち判定が一致するか)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
+
+    # --- 完全性比較モード: 旧solve_vcf と 新solve_vct が同じ局面で同じ勝ち判定をするか ---
+    if args.compare:
+        n_total = both = neither = only_vcf = only_vct = 0
+        diff_examples = []
+        attempts = 0
+        while n_total < args.positions and attempts < args.positions * 50 + 2000:
+            attempts += 1
+            board = gen_random_position(rng, args.kmin, args.kmax)
+            if board is None:
+                continue
+            p = infer_player(board)
+            wv = solve_vcf(board, p, args.depth) >= 0
+            wt = solve_vct(board, p, args.depth) >= 0
+            n_total += 1
+            if wv and wt:
+                both += 1
+            elif not wv and not wt:
+                neither += 1
+            elif wv and not wt:
+                only_vcf += 1
+                if len(diff_examples) < 5:
+                    diff_examples.append(("vcfのみ勝ち", list(board)))
+            else:
+                only_vct += 1
+                if len(diff_examples) < 5:
+                    diff_examples.append(("vctのみ勝ち", list(board)))
+        print("\n==== 完全性比較 (solve_vcf vs solve_vct, fours-only) ====")
+        print(f"局面数={n_total}  両方勝ち={both}  両方なし={neither}")
+        print(f"  vcfのみ勝ち(=vctが取りこぼし?): {only_vcf}")
+        print(f"  vctのみ勝ち(=vcfが取りこぼし or 偽陽性): {only_vct}")
+        print("判定: vcfのみ勝ち=0 なら vct は coverage を落とさない。差があればその盤面を要精査。")
+        for tag, b in diff_examples:
+            print(f"  [{tag}] BOARD_CSV:" + ",".join(map(str, b)))
+        return
+
     solver = solve_vct if args.solver == "vct" else solve_vcf
     print(f"検証対象ソルバー: {args.solver}", file=sys.stderr)
 
