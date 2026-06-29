@@ -36,7 +36,7 @@ from renju_transformer.rules import (
     is_forbidden_for_black,
 )
 # ソルバーと局面生成は test_tss_imitation のものを再利用
-from test_tss_imitation import vcf as solve_vcf, gen_random_position
+from test_tss_imitation import vcf as solve_vcf, gen_random_position, collect_template_cases
 
 N = 225
 SIDE = 15
@@ -311,6 +311,8 @@ def main():
                     help="検証するソルバー。vct=P1新実装(solve_vct_c_api, 要再ビルド)")
     ap.add_argument("--vct-threes", action="store_true",
                     help="solve_vct を活三込み(VCT, fours_only=0)で呼ぶ。P2の健全性ゲート用")
+    ap.add_argument("--use-templates", action="store_true",
+                    help="ランダム生成でなく型生成(template)の必勝局面で検証。スカスカで高速")
     ap.add_argument("--compare", action="store_true",
                     help="solve_vcf と solve_vct の完全性比較(同じ局面で勝ち判定が一致するか)")
     args = ap.parse_args()
@@ -363,17 +365,33 @@ def main():
     checked = 0
     attempts = 0
     fp_examples = []
-    print(f"健全性検証: ソルバー=VCF depth={args.depth} verify_depth={args.verify_depth} "
-          f"target={args.positions}", file=sys.stderr)
+    src = "template" if args.use_templates else "random"
+    print(f"健全性検証: ソルバー={args.solver} source={src} depth={args.depth} "
+          f"verify_depth={args.verify_depth} target={args.positions}", file=sys.stderr)
+
+    # 型(template)モード: スカスカの必勝局面を事前生成して順に検証(VCT探索が速い)
+    template_boards = None
+    if args.use_templates:
+        per_cat = max(1, args.positions // 4 + 1)
+        cases = collect_template_cases(rng, args.depth, per_cat)
+        template_boards = [c["board"] for c in cases]
+        print(f"型ケース {len(template_boards)} 個を生成", file=sys.stderr)
+    t_idx = 0
 
     while checked < args.positions and attempts < args.positions * 200 + 5000:
         attempts += 1
-        board = gen_random_position(rng, args.kmin, args.kmax)
-        if board is None:
-            continue
+        if args.use_templates:
+            if t_idx >= len(template_boards):
+                break                      # 型ケースを使い切った
+            board = template_boards[t_idx]
+            t_idx += 1
+        else:
+            board = gen_random_position(rng, args.kmin, args.kmax)
+            if board is None:
+                continue
         player = infer_player(board)
         if solver(board, player, args.depth) < 0:
-            continue                       # 必勝主張のある局面だけ検証
+            continue                       # 必勝主張のある局面だけ検証(型のblock系等はスキップ)
         checked += 1
         budget = [args.budget]
         ok = attacker_wins(board, player, solver, args.depth, args.verify_depth, budget)
