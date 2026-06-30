@@ -2,8 +2,15 @@
 """
 data.csv.gz から「都合の良い盤面」を抽出して JSON に保存し、HTML で可視化する。
 
-都合の良い = 中盤局面 (stones_min〜stones_max) かつ
-             VCF/VCT オラクルが attack または block を返す局面。
+カテゴリ別に抽出:
+  own_four       : 自分に四あり (VCF attack)
+  block_four     : 相手に四あり (VCF block)
+  own_three_win  : 自分に活三フォーク必勝 (VCT attack、VCFなし)
+  block_three_win: 相手に活三フォーク必勝 (VCT block、VCFなし)
+
+各カテゴリの目標数は --per-category で指定。
+own_three_win / block_three_win は稀 (約0.3-0.4%) なので
+--sample-rate を上げるか --per-category を小さくすること。
 
 出力:
   scripts/fixed_positions.json   -- 盤面データ
@@ -45,22 +52,30 @@ def solve_vct(board, player, depth=3):
     arr = (ctypes.c_int * 225)(*board)
     return get_lib().solve_vct_c_api(arr, player, depth, 0)
 
-def oracle(board, use_vct=False, vcf_depth=12, vct_depth=3):
-    """(kind, move_idx) を返す。kind: 'attack'|'block'|None"""
+def classify_category(board, vcf_depth=12, vct_depth=3):
+    """盤面を 4 カテゴリに分類して (category, oracle_move) を返す。
+    own_four / block_four / own_three_win / block_three_win / None"""
     me = infer_player(board)
     opp = WHITE if me == BLACK else BLACK
-    fn = (lambda b, p: solve_vct(b, p, vct_depth)) if use_vct else (lambda b, p: solve_vcf(b, p, vcf_depth))
-    my = fn(board, me)
-    if my >= 0:
-        return "attack", my
-    op = fn(board, opp)
-    if op >= 0:
-        return "block", op
+    my_vcf = solve_vcf(board, me, vcf_depth)
+    if my_vcf >= 0:
+        return "own_four", my_vcf
+    op_vcf = solve_vcf(board, opp, vcf_depth)
+    if op_vcf >= 0:
+        return "block_four", op_vcf
+    my_vct = solve_vct(board, me, vct_depth)
+    if my_vct >= 0:
+        return "own_three_win", my_vct
+    op_vct = solve_vct(board, opp, vct_depth)
+    if op_vct >= 0:
+        return "block_three_win", op_vct
     return None, -1
 
-def block_defense_set(board, use_vct=False, vcf_depth=12, vct_depth=3):
+def block_defense_set(board, category, vcf_depth=12, vct_depth=3):
+    """block 系カテゴリの正解手集合。自分が打つと相手の脅威が消える合法手全部。"""
     me = infer_player(board)
     opp = WHITE if me == BLACK else BLACK
+    use_vct = category == "block_three_win"
     fn = (lambda b, p: solve_vct(b, p, vct_depth)) if use_vct else (lambda b, p: solve_vcf(b, p, vcf_depth))
     s = set()
     legal = legal_move_mask(board)
@@ -82,38 +97,37 @@ def is_finished(board):
     return False
 
 
+CATEGORIES = ["own_four", "block_four", "own_three_win", "block_three_win"]
+BLOCK_CATS  = {"block_four", "block_three_win"}
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data.csv.gz")
-    ap.add_argument("--n", type=int, default=20, help="抽出する盤面数")
+    ap.add_argument("--per-category", type=int, default=5,
+                    help="カテゴリごとの目標枚数 (own_three_win等の稀なものは達しない場合あり)")
     ap.add_argument("--stones-min", type=int, default=10)
     ap.add_argument("--stones-max", type=int, default=35)
-    ap.add_argument("--use-vct", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out-json", default="scripts/fixed_positions.json")
     ap.add_argument("--out-html", default="scripts/fixed_positions.html")
-    ap.add_argument("--sample-rate", type=float, default=0.002,
-                    help="行をこの確率でサンプリング(速度調整)")
+    ap.add_argument("--sample-rate", type=float, default=0.01,
+                    help="行をこの確率でサンプリング (own_three_win が稀なので高めに設定)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
     data_path = PROJECT_ROOT / args.data
 
-    # カテゴリ別に最大 n//2 ずつ集める
-    buckets: dict[str, list] = {"attack": [], "block": []}
-    per_bucket = max(1, args.n // 2)
-    n_scanned = 0
+    buckets: dict[str, list] = {cat: [] for cat in CATEGORIES}
     n_candidate = 0
 
-    print(f"スキャン中: {data_path} (sample_rate={args.sample_rate}) ...")
+    print(f"スキャン中: {data_path}  (sample_rate={args.sample_rate}, per_category={args.per_category})")
     with gzip.open(data_path, "rt", encoding="utf-8") as f:
         reader = csv.reader(f)
         for row in reader:
             if rng.random() > args.sample_rate:
                 continue
-            if all(len(buckets[k]) >= per_bucket for k in buckets):
+            if all(len(buckets[cat]) >= args.per_category for cat in CATEGORIES):
                 break
-            n_scanned += 1
             board = [int(x) for x in row[:225]]
             stones = sum(1 for x in board if x != EMPTY)
             if not (args.stones_min <= stones <= args.stones_max):
@@ -121,33 +135,40 @@ def main():
             if is_finished(board):
                 continue
             try:
-                kind, mv = oracle(board, use_vct=args.use_vct)
+                cat, mv = classify_category(board)
             except Exception:
                 continue
-            if kind is None or mv < 0:
+            if cat is None or mv < 0:
                 continue
             if not legal_move_mask(board)[mv]:
                 continue
-            if len(buckets[kind]) >= per_bucket:
+            if len(buckets[cat]) >= args.per_category:
                 continue
             n_candidate += 1
             entry = {
                 "id": n_candidate,
                 "board": board,
                 "stones": stones,
-                "kind": kind,
+                "cat": cat,
                 "oracle_move": mv,
                 "oracle_row": int(mv // N),
                 "oracle_col": int(mv % N),
                 "to_move": "black" if infer_player(board) == BLACK else "white",
             }
-            if kind == "block":
-                cs = block_defense_set(board, use_vct=args.use_vct)
+            if cat in BLOCK_CATS:
+                cs = block_defense_set(board, cat)
                 entry["correct_set"] = sorted(cs)
-            buckets[kind].append(entry)
-            print(f"  [{kind}] #{len(buckets[kind])}/{per_bucket}  stones={stones}  move=({mv//N},{mv%N})")
+            buckets[cat].append(entry)
+            print(f"  [{cat}] #{len(buckets[cat])}/{args.per_category}  stones={stones}  move=({mv//N},{mv%N})")
 
-    positions = buckets["attack"] + buckets["block"]
+    for cat in CATEGORIES:
+        got = len(buckets[cat])
+        if got < args.per_category:
+            print(f"  [warn] {cat}: {got}/{args.per_category} のみ取得 (sample_rate を上げると増える)")
+
+    positions = []
+    for cat in CATEGORIES:
+        positions.extend(buckets[cat])
     positions.sort(key=lambda x: x["stones"])
 
     # ID を振り直す
@@ -176,7 +197,7 @@ def build_html(positions: list[dict]) -> str:
         board = pos["board"]
         oracle_mv = pos["oracle_move"]
         correct_set = set(pos.get("correct_set", [oracle_mv]))
-        kind = pos["kind"]
+        cat = pos["cat"]
         to_move = pos["to_move"]
 
         cell = size / N
@@ -214,8 +235,8 @@ def build_html(positions: list[dict]) -> str:
                 lines.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r_stone:.1f}" fill="#f5f5f5" stroke="#555" stroke-width="1"/>')
 
         # オラクル手をハイライト
-        # attack=赤、block=青
-        highlight_color = "#e33" if kind == "attack" else "#33e"
+        # attack系=赤、block系=青
+        highlight_color = "#e33" if cat in ("own_four", "own_three_win") else "#33e"
         for mv in correct_set:
             r, c = divmod(mv, N)
             cx = pad + c * cell
@@ -229,8 +250,14 @@ def build_html(positions: list[dict]) -> str:
     for pos in positions:
         svg = board_svg(pos)
         to_move_jp = "黒" if pos["to_move"] == "black" else "白"
-        kind_jp = "攻め (attack)" if pos["kind"] == "attack" else "受け (block)"
-        color_cls = "attack" if pos["kind"] == "attack" else "block"
+        cat = pos["cat"]
+        cat_jp = {
+            "own_four":        "自分の四 (own_four)",
+            "block_four":      "相手の四を受ける (block_four)",
+            "own_three_win":   "活三フォーク必勝 (own_three_win)",
+            "block_three_win": "相手活三フォークを受ける (block_three_win)",
+        }.get(cat, cat)
+        color_cls = "attack" if cat in ("own_four", "own_three_win") else "block"
         oracle_coord = f"({pos['oracle_row']}, {pos['oracle_col']})"
         correct_moves = pos.get("correct_set", [pos["oracle_move"]])
         correct_str = ", ".join(f"({m//N},{m%N})" for m in sorted(correct_moves)[:5])
@@ -241,7 +268,7 @@ def build_html(positions: list[dict]) -> str:
 <div class="card {color_cls}">
   <div class="card-header">
     <span class="id">#{pos['id']}</span>
-    <span class="badge {color_cls}">{kind_jp}</span>
+    <span class="badge {color_cls}">{cat_jp}</span>
     <span class="meta">手番:{to_move_jp} / {pos['stones']}石</span>
   </div>
   {svg}
