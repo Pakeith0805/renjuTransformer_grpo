@@ -100,7 +100,7 @@ def _get_mcts_lib():
     return _mcts_lib
 
 def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12,
-                  use_tss: bool = False, use_puct: bool = False) -> float:
+                  use_tss: bool = False, use_puct: bool = False, use_vct: bool = False) -> float:
     try:
         lib = _get_mcts_lib()
         player = infer_player(board)
@@ -140,19 +140,25 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
                 if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
                     return 1.0
                 else:
-                    # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
+                    # 相手にブロックさせた局面 (player手番) でTSS勝ちがあるか
                     blocked_board = board_with_move(next_board, block_idx, opponent)
                     if winner_after_move(blocked_board, block_idx, opponent) == opponent:
                         return 0.0
                     blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
-                    my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
+                    if use_vct:
+                        my_vcf = lib.solve_vct_c_api(blocked_board_array, player, max_vcf_depth, 0)
+                    else:
+                        my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
                     if my_vcf >= 0:
                         return 1.0
 
-            # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
+            # 3. 相手 (opponent) にとって、次の局面 (next_board) でTSS勝ち手順があるか
             if not player_immediate_wins:
                 next_board_array = (ctypes.c_int * 225)(*next_board)
-                opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
+                if use_vct:
+                    opp_vcf = lib.solve_vct_c_api(next_board_array, opponent, max_vcf_depth, 0)
+                else:
+                    opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
                 if opp_vcf >= 0:
                     return 0.0
 
@@ -163,10 +169,11 @@ def run_mcts_eval(board: list[int], move_idx: int, simulations: int = 200, seed:
         print(f"Error running MCTS eval (DLL): {e}", file=sys.stderr)
         return 0.5
 
-def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list[float], 
+def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list[float],
                               simulations: int = 200, seed: int = 42, max_vcf_depth: int = 12,
                               use_tss: bool = False, use_puct: bool = False,
-                              use_length_penalty: bool = False, length_penalty_coef: float = 0.02) -> float:
+                              use_length_penalty: bool = False, length_penalty_coef: float = 0.02,
+                              use_vct: bool = False) -> float:
     try:
         lib = _get_mcts_lib()
         player = infer_player(board)
@@ -212,12 +219,15 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
                 if opponent == 1 and is_forbidden_for_black(next_board, block_idx):
                     return 1.0 - mcts_coef * 3 if use_length_penalty else 1.0
                 else:
-                    # 相手にブロックさせた局面 (player手番) でVCF勝ちがあるか
+                    # 相手にブロックさせた局面 (player手番) でTSS勝ちがあるか
                     blocked_board = board_with_move(next_board, block_idx, opponent)
                     if winner_after_move(blocked_board, block_idx, opponent) == opponent:
                         return 0.0 + mcts_coef * 3 if use_length_penalty else 0.0
                     blocked_board_array = (ctypes.c_int * 225)(*blocked_board)
-                    my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
+                    if use_vct:
+                        my_vcf = lib.solve_vct_c_api(blocked_board_array, player, max_vcf_depth, 0)
+                    else:
+                        my_vcf = lib.solve_vcf_c_api(blocked_board_array, player, max_vcf_depth)
                     if my_vcf >= 0:
                         if use_length_penalty:
                             path_array = (ctypes.c_int * 256)()
@@ -227,10 +237,13 @@ def run_mcts_eval_with_policy(board: list[int], move_idx: int, prior_probs: list
                         else:
                             return 1.0
 
-            # 3. 相手 (opponent) にとって、次の局面 (next_board) で VCF 勝ち手順があるか
+            # 3. 相手 (opponent) にとって、次の局面 (next_board) でTSS勝ち手順があるか
             if not player_immediate_wins:
                 next_board_array = (ctypes.c_int * 225)(*next_board)
-                opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
+                if use_vct:
+                    opp_vcf = lib.solve_vct_c_api(next_board_array, opponent, max_vcf_depth, 0)
+                else:
+                    opp_vcf = lib.solve_vcf_c_api(next_board_array, opponent, max_vcf_depth)
                 if opp_vcf >= 0:
                     if use_length_penalty:
                         path_array = (ctypes.c_int * 256)()
@@ -281,7 +294,7 @@ class GRPOAgent:
     def __init__(self, policy_model, ref_model, tokenizer, device, mcts_simulations=200,
                  use_tss_collection=False, use_tss_training=False,
                  use_puct_collection=False, use_puct_training=False,
-                 value_model=None):
+                 value_model=None, use_vct_rollout=False):
         self.policy = policy_model
         self.ref = ref_model
         self.tokenizer = tokenizer
@@ -293,6 +306,7 @@ class GRPOAgent:
         self.use_tss_training = use_tss_training
         self.use_puct_collection = use_puct_collection
         self.use_puct_training = use_puct_training
+        self.use_vct_rollout = use_vct_rollout  # MCTSロールアウトのTSS判定をVCT(四+活三)化
         # あらかじめメインスレッドでDLLをロードし、スレッド間の初期化競合を防ぐ
         try:
             _get_mcts_lib()
@@ -417,7 +431,8 @@ class GRPOAgent:
         win_rate = run_mcts_eval_with_policy(
             initial_board_state, first_move_idx, probs, self.mcts_simulations,
             use_tss=self.use_tss_training, use_puct=self.use_puct_training,
-            use_length_penalty=use_length_penalty, length_penalty_coef=length_penalty_coef
+            use_length_penalty=use_length_penalty, length_penalty_coef=length_penalty_coef,
+            use_vct=self.use_vct_rollout,
         )
         reward = 2.0 * win_rate - 1.0 # 0～1を-1～1に変換している
         
@@ -478,7 +493,8 @@ class GRPOAgent:
                     use_tss=self.use_tss_training,
                     use_puct=self.use_puct_training,
                     use_length_penalty=use_length_penalty,
-                    length_penalty_coef=length_penalty_coef
+                    length_penalty_coef=length_penalty_coef,
+                    use_vct=self.use_vct_rollout,
                 ): i
                 for i, move_idx in enumerate(unique_moves)
             }
