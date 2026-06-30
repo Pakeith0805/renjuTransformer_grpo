@@ -307,6 +307,7 @@ class GRPOAgent:
         self.use_puct_collection = use_puct_collection
         self.use_puct_training = use_puct_training
         self.use_vct_rollout = use_vct_rollout  # MCTSロールアウトのTSS判定をVCT(四+活三)化
+        self.vct_depth = 3  # use_vct_rollout 時のVCT探索深さ(renju-grpo.py で上書き)
         # あらかじめメインスレッドでDLLをロードし、スレッド間の初期化競合を防ぐ
         try:
             _get_mcts_lib()
@@ -430,6 +431,7 @@ class GRPOAgent:
 
         win_rate = run_mcts_eval_with_policy(
             initial_board_state, first_move_idx, probs, self.mcts_simulations,
+            max_vcf_depth=self.vct_depth if self.use_vct_rollout else 12,
             use_tss=self.use_tss_training, use_puct=self.use_puct_training,
             use_length_penalty=use_length_penalty, length_penalty_coef=length_penalty_coef,
             use_vct=self.use_vct_rollout,
@@ -490,6 +492,7 @@ class GRPOAgent:
                     batch_probs[i],
                     self.mcts_simulations,
                     seed=42 + i * 997, # MCTSの挙動が重ならないようシードをずらす
+                    max_vcf_depth=self.vct_depth if self.use_vct_rollout else 12,
                     use_tss=self.use_tss_training,
                     use_puct=self.use_puct_training,
                     use_length_penalty=use_length_penalty,
